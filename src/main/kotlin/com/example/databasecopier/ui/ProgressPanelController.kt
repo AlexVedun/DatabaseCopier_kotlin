@@ -4,9 +4,13 @@ import com.example.databasecopier.AppScope
 import com.example.databasecopier.adapter.ConnectionConfig
 import com.example.databasecopier.adapter.JdbcSourceAdapter
 import com.example.databasecopier.adapter.JdbcTargetAdapter
+import com.example.databasecopier.adapter.SourceAdapter
 import com.example.databasecopier.connection.ConnectionRepository
 import com.example.databasecopier.copy.CopyProgressEvent
 import com.example.databasecopier.copy.CopyRunner
+import com.example.databasecopier.dump.DumpDialect
+import com.example.databasecopier.dump.MysqlDumpSourceAdapter
+import com.example.databasecopier.dump.PostgresDumpSourceAdapter
 import com.example.databasecopier.session.CopySessionRepository
 import javafx.geometry.Insets
 import javafx.scene.control.Alert
@@ -19,6 +23,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 /** Раздел "Прогресс": запуск/пауза/отмена копирования, отображение прогресса по текущей таблице. */
 class ProgressPanelController(
@@ -54,14 +59,13 @@ class ProgressPanelController(
     }
 
     private fun start() {
-        val sourceConfig = source.connectionConfig
-        val sourceConnId = source.connectionId
+        val selection = source.currentSelection()
         val targetConfig = target.connectionConfig
         val targetConnId = target.connectionId
         val tables = source.selectedTables()
 
-        if (sourceConfig == null || sourceConnId == null) {
-            showError("Сначала проверьте подключение источника")
+        if (selection == null) {
+            showError("Сначала настройте источник (подключение или дамп)")
             return
         }
         if (targetConfig == null || targetConnId == null) {
@@ -73,25 +77,29 @@ class ProgressPanelController(
             return
         }
 
+        val sourceName = when (selection) {
+            is SourceSelection.Connection -> selection.config.database
+            is SourceSelection.Dump -> selection.file.name
+        }
         val newSessionId = CopySessionRepository.createSession(
-            name = "${sourceConfig.database} -> ${targetConfig.database}",
-            sourceType = "connection",
-            sourceConnectionId = sourceConnId,
-            sourceDumpPath = null,
-            sourceDumpDialect = null,
+            name = "$sourceName -> ${targetConfig.database}",
+            sourceType = if (selection is SourceSelection.Connection) "connection" else "dump",
+            sourceConnectionId = (selection as? SourceSelection.Connection)?.connectionId,
+            sourceDumpPath = (selection as? SourceSelection.Dump)?.file?.absolutePath,
+            sourceDumpDialect = (selection as? SourceSelection.Dump)?.dialect?.name?.lowercase(),
             targetConnectionId = targetConnId,
             copyMode = target.copyMode(),
             batchSize = target.batchSize(),
         )
         tables.forEach { CopySessionRepository.addTable(newSessionId, it) }
 
-        launchCopy(newSessionId, sourceConfig, targetConfig, tables.size)
+        launchCopy(newSessionId, source.createAdapter(), targetConfig, tables.size)
     }
 
     /**
      * Продолжает ранее сохранённую (paused/failed/draft-незавершённую) сессию, выбранную в
-     * SessionsView — подключения и список таблиц уже сохранены в служебной БД, никакого нового
-     * ввода от пользователя не требуется.
+     * SessionsView — подключения/файл дампа и список таблиц уже сохранены в служебной БД,
+     * никакого нового ввода от пользователя не требуется.
      */
     fun resumeSession(id: Int) {
         val session = CopySessionRepository.getSession(id)
@@ -99,23 +107,45 @@ class ProgressPanelController(
             showError("Сессия не найдена")
             return
         }
-        val sourceConnId = session.sourceConnectionId
-        if (session.sourceType != "connection" || sourceConnId == null) {
-            showError("Продолжение сессий из SQL-дампа появится на следующем шаге")
-            return
+        val sourceAdapter: SourceAdapter = when (session.sourceType) {
+            "connection" -> {
+                val connId = session.sourceConnectionId
+                val config = connId?.let { ConnectionRepository.load(it) }
+                if (config == null) {
+                    showError("Не удалось загрузить сохранённое подключение источника")
+                    return
+                }
+                JdbcSourceAdapter(config)
+            }
+            "dump" -> {
+                val path = session.sourceDumpPath
+                val dialect = session.sourceDumpDialect?.let { runCatching { DumpDialect.valueOf(it.uppercase()) }.getOrNull() }
+                if (path == null || dialect == null) {
+                    showError("Не удалось восстановить параметры дампа для этой сессии")
+                    return
+                }
+                val file = File(path)
+                when (dialect) {
+                    DumpDialect.MYSQL -> MysqlDumpSourceAdapter(file)
+                    DumpDialect.POSTGRESQL -> PostgresDumpSourceAdapter(file)
+                }
+            }
+            else -> {
+                showError("Неизвестный тип источника: ${session.sourceType}")
+                return
+            }
         }
-        val sourceConfig = ConnectionRepository.load(sourceConnId)
         val targetConfig = ConnectionRepository.load(session.targetConnectionId)
-        if (sourceConfig == null || targetConfig == null) {
-            showError("Не удалось загрузить сохранённое подключение для этой сессии")
+        if (targetConfig == null) {
+            showError("Не удалось загрузить сохранённое подключение приёмника")
             return
         }
         val totalTables = CopySessionRepository.getTables(id).count { it.isSelected }
 
-        launchCopy(id, sourceConfig, targetConfig, totalTables)
+        launchCopy(id, sourceAdapter, targetConfig, totalTables)
     }
 
-    private fun launchCopy(id: Int, sourceConfig: ConnectionConfig, targetConfig: ConnectionConfig, totalTables: Int) {
+    private fun launchCopy(id: Int, sourceAdapter: SourceAdapter, targetConfig: ConnectionConfig, totalTables: Int) {
         sessionId = id
         CopySessionRepository.updateSessionStatus(id, "running")
 
@@ -130,7 +160,6 @@ class ProgressPanelController(
         }
 
         AppScope.scope.launch {
-            val sourceAdapter = JdbcSourceAdapter(sourceConfig)
             val targetAdapter = JdbcTargetAdapter(targetConfig)
             try {
                 sourceAdapter.connect()
