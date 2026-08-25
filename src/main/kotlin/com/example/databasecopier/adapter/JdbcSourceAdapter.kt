@@ -118,6 +118,35 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
             return result
         }
 
+        if (config.type == DbType.SQLSERVER) {
+            // У MSSQL INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE (в отличие от Postgres) отдаёт
+            // constrained-сторону, а не referenced — поэтому FK читаем через системные каталоги.
+            val result = mutableListOf<ForeignKeyRef>()
+            val sql = "SELECT cp.name AS column_name, tr.name AS referenced_table, cr.name AS referenced_column " +
+                "FROM sys.foreign_keys fk " +
+                "JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id " +
+                "JOIN sys.tables tp ON fkc.parent_object_id = tp.object_id " +
+                "JOIN sys.columns cp ON fkc.parent_object_id = cp.object_id AND fkc.parent_column_id = cp.column_id " +
+                "JOIN sys.tables tr ON fkc.referenced_object_id = tr.object_id " +
+                "JOIN sys.columns cr ON fkc.referenced_object_id = cr.object_id AND fkc.referenced_column_id = cr.column_id " +
+                "WHERE tp.name = ?"
+            connection.prepareStatement(sql).use { ps ->
+                ps.setString(1, table)
+                ps.executeQuery().use { rs ->
+                    while (rs.next()) {
+                        result.add(
+                            ForeignKeyRef(
+                                columnName = rs.getString("column_name"),
+                                referencedTable = rs.getString("referenced_table"),
+                                referencedColumn = rs.getString("referenced_column"),
+                            )
+                        )
+                    }
+                }
+            }
+            return result
+        }
+
         val sql = when (config.type) {
             DbType.MYSQL ->
                 "SELECT column_name, referenced_table_name AS referenced_table, referenced_column_name AS referenced_column " +
@@ -184,10 +213,23 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
         batchSize: Int,
     ): BatchResult {
         val lastValue = cursor?.let { (it as? kotlinx.serialization.json.JsonObject)?.get("value")?.jsonPrimitive?.content }
+        val isMssql = config.type == DbType.SQLSERVER
+        // MSSQL не поддерживает LIMIT — постраничность там выражается через
+        // ORDER BY ... OFFSET 0 ROWS FETCH NEXT ? ROWS ONLY (offset всегда 0, т.к. отсечение уже
+        // сделано условием WHERE pk > ?, либо его нет вовсе на первом батче).
         val sql = if (lastValue != null) {
-            "SELECT * FROM ${quote(table)} WHERE ${quote(pkColumn)} > ? ORDER BY ${quote(pkColumn)} LIMIT ?"
+            if (isMssql) {
+                "SELECT * FROM ${quote(table)} WHERE ${quote(pkColumn)} > ? " +
+                    "ORDER BY ${quote(pkColumn)} OFFSET 0 ROWS FETCH NEXT ? ROWS ONLY"
+            } else {
+                "SELECT * FROM ${quote(table)} WHERE ${quote(pkColumn)} > ? ORDER BY ${quote(pkColumn)} LIMIT ?"
+            }
         } else {
-            "SELECT * FROM ${quote(table)} ORDER BY ${quote(pkColumn)} LIMIT ?"
+            if (isMssql) {
+                "SELECT * FROM ${quote(table)} ORDER BY ${quote(pkColumn)} OFFSET 0 ROWS FETCH NEXT ? ROWS ONLY"
+            } else {
+                "SELECT * FROM ${quote(table)} ORDER BY ${quote(pkColumn)} LIMIT ?"
+            }
         }
 
         val rows = mutableListOf<Map<String, Any?>>()
@@ -229,12 +271,23 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
 
     private fun readBatchByOffset(table: String, cursor: JsonElement?, batchSize: Int): BatchResult {
         val offset = cursor?.let { (it as? kotlinx.serialization.json.JsonObject)?.get("value")?.jsonPrimitive?.content?.toLong() } ?: 0L
-        val sql = "SELECT * FROM ${quote(table)} LIMIT ? OFFSET ?"
+        // Без PK нет естественного столбца для ORDER BY — но MSSQL требует ORDER BY для
+        // OFFSET/FETCH синтаксически, поэтому используем заведомо "пустую" сортировку.
+        val sql = if (config.type == DbType.SQLSERVER) {
+            "SELECT * FROM ${quote(table)} ORDER BY (SELECT NULL) OFFSET ? ROWS FETCH NEXT ? ROWS ONLY"
+        } else {
+            "SELECT * FROM ${quote(table)} LIMIT ? OFFSET ?"
+        }
 
         val rows = mutableListOf<Map<String, Any?>>()
         connection.prepareStatement(sql).use { ps ->
-            ps.setInt(1, batchSize)
-            ps.setLong(2, offset)
+            if (config.type == DbType.SQLSERVER) {
+                ps.setLong(1, offset)
+                ps.setInt(2, batchSize)
+            } else {
+                ps.setInt(1, batchSize)
+                ps.setLong(2, offset)
+            }
             ps.executeQuery().use { rs ->
                 val meta = rs.metaData
                 while (rs.next()) rows.add(rowToMap(rs, meta))
@@ -266,6 +319,7 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
         return when (config.type) {
             DbType.MYSQL -> "${prefix}table_schema = '${config.database}'"
             DbType.POSTGRESQL -> "${prefix}table_schema = 'public'"
+            DbType.SQLSERVER -> "${prefix}table_schema = 'dbo'"
             else -> "1=1"
         }
     }
@@ -273,7 +327,7 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
     private fun quote(identifier: String): String = when (config.type) {
         DbType.MYSQL -> "`$identifier`"
         DbType.POSTGRESQL, DbType.SQLITE -> "\"$identifier\""
-        else -> identifier
+        DbType.SQLSERVER -> "[$identifier]"
     }
 
     override fun close() {

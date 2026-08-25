@@ -63,39 +63,56 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
     }
 
     override fun disableForeignKeyChecks() {
-        connection.createStatement().use { stmt ->
-            when (config.type) {
-                DbType.MYSQL -> stmt.execute("SET FOREIGN_KEY_CHECKS=0")
-                DbType.POSTGRESQL -> stmt.execute("SET session_replication_role = 'replica'")
-                DbType.SQLITE -> stmt.execute("PRAGMA foreign_keys = OFF")
-                DbType.SQLSERVER -> { /* реализуется в Шаге 9 (ALTER TABLE ... NOCHECK CONSTRAINT ALL для каждой таблицы) */ }
+        when (config.type) {
+            DbType.MYSQL -> connection.createStatement().use { it.execute("SET FOREIGN_KEY_CHECKS=0") }
+            DbType.POSTGRESQL -> connection.createStatement().use { it.execute("SET session_replication_role = 'replica'") }
+            DbType.SQLITE -> connection.createStatement().use { it.execute("PRAGMA foreign_keys = OFF") }
+            // У MSSQL нет сессионного тумблера — переключается по каждой таблице отдельно.
+            DbType.SQLSERVER -> forEachTable { fullName ->
+                connection.createStatement().use { it.execute("ALTER TABLE $fullName NOCHECK CONSTRAINT ALL") }
             }
         }
         connection.commit()
     }
 
     override fun enableForeignKeyChecks() {
-        connection.createStatement().use { stmt ->
-            when (config.type) {
-                DbType.MYSQL -> stmt.execute("SET FOREIGN_KEY_CHECKS=1")
-                DbType.POSTGRESQL -> stmt.execute("SET session_replication_role = 'origin'")
-                DbType.SQLITE -> stmt.execute("PRAGMA foreign_keys = ON")
-                DbType.SQLSERVER -> { /* реализуется в Шаге 9 */ }
+        when (config.type) {
+            DbType.MYSQL -> connection.createStatement().use { it.execute("SET FOREIGN_KEY_CHECKS=1") }
+            DbType.POSTGRESQL -> connection.createStatement().use { it.execute("SET session_replication_role = 'origin'") }
+            DbType.SQLITE -> connection.createStatement().use { it.execute("PRAGMA foreign_keys = ON") }
+            // CHECK CONSTRAINT ALL (без WITH CHECK) включает проверку для новых DML, не
+            // перепроверяя уже вставленные строки — то же поведение, что и у остальных СУБД здесь.
+            DbType.SQLSERVER -> forEachTable { fullName ->
+                connection.createStatement().use { it.execute("ALTER TABLE $fullName CHECK CONSTRAINT ALL") }
             }
         }
         connection.commit()
     }
 
+    private fun forEachTable(action: (String) -> Unit) {
+        val names = mutableListOf<String>()
+        connection.createStatement().use { stmt ->
+            stmt.executeQuery(
+                "SELECT s.name AS schema_name, t.name AS table_name " +
+                    "FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id"
+            ).use { rs ->
+                while (rs.next()) names.add("[${rs.getString("schema_name")}].[${rs.getString("table_name")}]")
+            }
+        }
+        names.forEach(action)
+    }
+
     private fun schemaClause(): String = when (config.type) {
         DbType.MYSQL -> "table_schema = '${config.database}'"
         DbType.POSTGRESQL -> "table_schema = 'public'"
+        DbType.SQLSERVER -> "table_schema = 'dbo'"
         else -> "1=1"
     }
 
     private fun quote(identifier: String): String = when (config.type) {
         DbType.MYSQL -> "`$identifier`"
         DbType.POSTGRESQL, DbType.SQLITE -> "\"$identifier\""
-        else -> identifier
+        DbType.SQLSERVER -> "[$identifier]"
     }
 
     override fun close() {

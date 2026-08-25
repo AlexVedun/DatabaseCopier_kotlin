@@ -17,7 +17,7 @@ import javafx.scene.layout.GridPane
  */
 class ConnectionForm {
     val dbTypeCombo: ComboBox<DbType> = ComboBox<DbType>().apply {
-        items.addAll(DbType.MYSQL, DbType.POSTGRESQL, DbType.SQLITE)
+        items.addAll(DbType.MYSQL, DbType.POSTGRESQL, DbType.SQLITE, DbType.SQLSERVER)
         value = DbType.MYSQL
     }
     val hostField = TextField().apply { promptText = "host" }

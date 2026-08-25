@@ -47,7 +47,18 @@ object TypeMapper {
                     t.contains("floa") || t.contains("doub") -> LogicalType.DECIMAL
                 else -> LogicalType.TEXT
             }
-            DbType.SQLSERVER -> LogicalType.TEXT // не используется до Шага 9
+            DbType.SQLSERVER -> when {
+                t == "bit" -> LogicalType.BOOLEAN
+                t == "tinyint" || t == "smallint" || t == "int" -> LogicalType.INTEGER
+                t == "bigint" -> LogicalType.BIGINT
+                t.startsWith("nvarchar") || t.startsWith("varchar") || t.startsWith("nchar") || t.startsWith("char") -> LogicalType.VARCHAR
+                t == "text" || t == "ntext" -> LogicalType.TEXT
+                t.startsWith("decimal") || t.startsWith("numeric") || t == "float" || t == "real" || t == "money" || t == "smallmoney" -> LogicalType.DECIMAL
+                t == "date" -> LogicalType.DATE
+                t.startsWith("datetime") || t == "smalldatetime" -> LogicalType.DATETIME
+                t == "uniqueidentifier" -> LogicalType.UUID
+                else -> LogicalType.TEXT
+            }
         }
     }
 
@@ -83,6 +94,17 @@ object TypeMapper {
             LogicalType.JSON, LogicalType.UUID -> "TEXT"
             LogicalType.DECIMAL -> "NUMERIC"
         }
-        DbType.SQLSERVER -> "TEXT" // не используется до Шага 9
+        DbType.SQLSERVER -> when (type) {
+            LogicalType.INTEGER -> "INT"
+            LogicalType.BIGINT -> "BIGINT"
+            LogicalType.VARCHAR -> "NVARCHAR(255)"
+            LogicalType.TEXT -> "NVARCHAR(MAX)"
+            LogicalType.DECIMAL -> "DECIMAL(20,4)"
+            LogicalType.BOOLEAN -> "BIT"
+            LogicalType.DATE -> "DATE"
+            LogicalType.DATETIME -> "DATETIME2"
+            LogicalType.JSON -> "NVARCHAR(MAX)" // у MSSQL нет отдельного JSON-типа
+            LogicalType.UUID -> "UNIQUEIDENTIFIER"
+        }
     }
 }
