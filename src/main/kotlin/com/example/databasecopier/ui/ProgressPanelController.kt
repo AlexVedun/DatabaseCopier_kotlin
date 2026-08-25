@@ -1,8 +1,10 @@
 package com.example.databasecopier.ui
 
 import com.example.databasecopier.AppScope
+import com.example.databasecopier.adapter.ConnectionConfig
 import com.example.databasecopier.adapter.JdbcSourceAdapter
 import com.example.databasecopier.adapter.JdbcTargetAdapter
+import com.example.databasecopier.connection.ConnectionRepository
 import com.example.databasecopier.copy.CopyProgressEvent
 import com.example.databasecopier.copy.CopyRunner
 import com.example.databasecopier.session.CopySessionRepository
@@ -82,17 +84,49 @@ class ProgressPanelController(
             batchSize = target.batchSize(),
         )
         tables.forEach { CopySessionRepository.addTable(newSessionId, it) }
-        sessionId = newSessionId
-        CopySessionRepository.updateSessionStatus(newSessionId, "running")
+
+        launchCopy(newSessionId, sourceConfig, targetConfig, tables.size)
+    }
+
+    /**
+     * Продолжает ранее сохранённую (paused/failed/draft-незавершённую) сессию, выбранную в
+     * SessionsView — подключения и список таблиц уже сохранены в служебной БД, никакого нового
+     * ввода от пользователя не требуется.
+     */
+    fun resumeSession(id: Int) {
+        val session = CopySessionRepository.getSession(id)
+        if (session == null) {
+            showError("Сессия не найдена")
+            return
+        }
+        val sourceConnId = session.sourceConnectionId
+        if (session.sourceType != "connection" || sourceConnId == null) {
+            showError("Продолжение сессий из SQL-дампа появится на следующем шаге")
+            return
+        }
+        val sourceConfig = ConnectionRepository.load(sourceConnId)
+        val targetConfig = ConnectionRepository.load(session.targetConnectionId)
+        if (sourceConfig == null || targetConfig == null) {
+            showError("Не удалось загрузить сохранённое подключение для этой сессии")
+            return
+        }
+        val totalTables = CopySessionRepository.getTables(id).count { it.isSelected }
+
+        launchCopy(id, sourceConfig, targetConfig, totalTables)
+    }
+
+    private fun launchCopy(id: Int, sourceConfig: ConnectionConfig, targetConfig: ConnectionConfig, totalTables: Int) {
+        sessionId = id
+        CopySessionRepository.updateSessionStatus(id, "running")
 
         startButton.isDisable = true
         pauseButton.isDisable = false
         cancelButton.isDisable = false
-        overallLabel.text = "Копирование: 0 из ${tables.size} таблиц"
+        overallLabel.text = "Копирование: 0 из $totalTables таблиц"
 
         val runner = CopyRunner()
         collectorJob = AppScope.scope.launch {
-            runner.progress.collect { event -> withContext(Dispatchers.Main) { onProgress(event, tables.size) } }
+            runner.progress.collect { event -> withContext(Dispatchers.Main) { onProgress(event, totalTables) } }
         }
 
         AppScope.scope.launch {
@@ -101,12 +135,12 @@ class ProgressPanelController(
             try {
                 sourceAdapter.connect()
                 targetAdapter.connect()
-                runner.run(newSessionId, sourceAdapter, targetAdapter)
+                runner.run(id, sourceAdapter, targetAdapter)
             } finally {
                 sourceAdapter.close()
                 targetAdapter.close()
                 collectorJob?.cancel()
-                withContext(Dispatchers.Main) { onFinished(newSessionId) }
+                withContext(Dispatchers.Main) { onFinished(id) }
             }
         }
     }

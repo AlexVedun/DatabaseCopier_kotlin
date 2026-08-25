@@ -2,8 +2,10 @@ package com.example.databasecopier
 
 import com.example.databasecopier.session.CopySessionRepository
 import com.example.databasecopier.ui.CopyView
+import com.example.databasecopier.ui.SessionsView
 import javafx.application.Application
 import javafx.scene.Scene
+import javafx.scene.layout.StackPane
 import javafx.stage.Stage
 
 class DatabaseCopierApp : Application() {
@@ -11,12 +13,24 @@ class DatabaseCopierApp : Application() {
         initAppDatabase()
         CopySessionRepository.pauseAllRunningSessions()
 
-        val root = CopyView().root
-        val scene = Scene(root, 900.0, 700.0)
-
+        val scene = Scene(StackPane(), 900.0, 700.0)
         stage.title = "Database Copier"
         stage.scene = scene
         stage.show()
+
+        showInitialScreen(scene)
+    }
+
+    private fun showInitialScreen(scene: Scene) {
+        val resumable = CopySessionRepository.listResumable()
+        if (resumable.isEmpty()) {
+            scene.root = CopyView().root
+        } else {
+            scene.root = SessionsView(
+                onContinue = { id -> scene.root = CopyView(existingSessionId = id).root },
+                onSkip = { scene.root = CopyView().root },
+            ).root
+        }
     }
 }
 

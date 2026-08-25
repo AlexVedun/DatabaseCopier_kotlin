@@ -4,6 +4,7 @@ import com.example.databasecopier.CopySessionTables
 import com.example.databasecopier.CopySessions
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.inList
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.select
 import org.jetbrains.exposed.sql.transactions.transaction
@@ -57,6 +58,14 @@ object CopySessionRepository {
             .map { it.toTableRecord() }
     }
 
+    /** Сессии, которые имеет смысл показать на стартовом экране как "продолжаемые". */
+    fun listResumable(): List<CopySessionRecord> = transaction {
+        CopySessions.select {
+            CopySessions.status inList listOf("draft", "paused", "running", "failed")
+        }.orderBy(CopySessions.updatedAt, org.jetbrains.exposed.sql.SortOrder.DESC)
+            .map { it.toSessionRecord() }
+    }
+
     fun updateSessionStatus(id: Int, status: String, lastError: String? = null) = transaction {
         CopySessions.update({ CopySessions.id eq id }) {
             it[CopySessions.status] = status
@@ -108,6 +117,7 @@ object CopySessionRepository {
         copyMode = this[CopySessions.copyMode],
         batchSize = this[CopySessions.batchSize],
         lastError = this[CopySessions.lastError],
+        updatedAt = this[CopySessions.updatedAt],
     )
 
     private fun ResultRow.toTableRecord() = CopySessionTableRecord(

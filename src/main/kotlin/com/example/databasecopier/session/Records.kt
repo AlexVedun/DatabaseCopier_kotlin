@@ -12,6 +12,7 @@ data class CopySessionRecord(
     val copyMode: String, // structure_only/structure_and_data
     val batchSize: Int,
     val lastError: String?,
+    val updatedAt: Long,
 )
 
 data class CopySessionTableRecord(
