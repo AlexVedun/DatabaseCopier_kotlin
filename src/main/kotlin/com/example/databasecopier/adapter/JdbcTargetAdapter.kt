@@ -23,7 +23,12 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
         } else ""
 
         connection.createStatement().use { stmt ->
-            stmt.execute("CREATE TABLE IF NOT EXISTS ${quote(structure.name)} ($columnsSql$pkSql)")
+            // Если таблица с таким именем уже существует на target — она безусловно удаляется
+            // и создаётся заново по структуре источника (решение зафиксировано с пользователем:
+            // не пытаться угадывать совместимость существующей схемы, а гарантировать, что
+            // структура target всегда точно соответствует source).
+            stmt.execute("DROP TABLE IF EXISTS ${quote(structure.name)}")
+            stmt.execute("CREATE TABLE ${quote(structure.name)} ($columnsSql$pkSql)")
         }
         connection.commit()
     }

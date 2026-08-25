@@ -146,6 +146,30 @@ abstract class JdbcAdapterTestBase {
     }
 
     @Test
+    fun `recreates an existing target table dropping its old structure and data`() {
+        rawConnection.createStatement().use { stmt ->
+            stmt.execute("CREATE TABLE copy_target (old_col VARCHAR(50))")
+            stmt.execute("INSERT INTO copy_target (old_col) VALUES ('stale')")
+        }
+
+        val newStructure = TableStructure(
+            name = "copy_target",
+            columns = listOf(ColumnDef("id", LogicalType.INTEGER, nullable = false)),
+            primaryKey = listOf("id"),
+        )
+        target.createTable(newStructure)
+        target.insertBatch("copy_target", listOf(mapOf("id" to 1)))
+
+        rawConnection.createStatement().use { stmt ->
+            stmt.executeQuery("SELECT COUNT(*) FROM copy_target").use { rs ->
+                rs.next()
+                assertEquals(1, rs.getInt(1))
+            }
+            stmt.execute("DROP TABLE copy_target")
+        }
+    }
+
+    @Test
     fun `allows inserting a row with a dangling foreign key while checks are disabled`() {
         // FOREIGN_KEY_CHECKS/session_replication_role — настройки уровня сессии, поэтому и
         // отключение, и сама вставка обязаны идти через одно и то же JDBC-соединение (target).
