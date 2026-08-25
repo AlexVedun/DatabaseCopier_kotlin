@@ -1,5 +1,6 @@
 package com.example.databasecopier
 
+import com.example.databasecopier.session.CopySessionRepository
 import javafx.application.Application
 import javafx.scene.Scene
 import javafx.scene.control.Label
@@ -9,6 +10,7 @@ import javafx.stage.Stage
 class DatabaseCopierApp : Application() {
     override fun start(stage: Stage) {
         initAppDatabase()
+        CopySessionRepository.pauseAllRunningSessions()
 
         val root = StackPane(Label("Database Copier - Hello World"))
         val scene = Scene(root, 400.0, 300.0)
