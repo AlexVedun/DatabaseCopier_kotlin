@@ -43,15 +43,19 @@ dependencies {
     // Testing
     testImplementation(kotlin("test"))
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
-    testImplementation("org.testcontainers:testcontainers:1.20.1")
-    testImplementation("org.testcontainers:junit-jupiter:1.20.1")
-    testImplementation("org.testcontainers:mysql:1.20.1")
-    testImplementation("org.testcontainers:postgresql:1.20.1")
-    testImplementation("org.testcontainers:mssqlserver:1.20.1")
+    testImplementation("org.testcontainers:testcontainers:1.21.3")
+    testImplementation("org.testcontainers:junit-jupiter:1.21.3")
+    testImplementation("org.testcontainers:mysql:1.21.3")
+    testImplementation("org.testcontainers:postgresql:1.21.3")
+    testImplementation("org.testcontainers:mssqlserver:1.21.3")
 }
 
 tasks.test {
     useJUnitPlatform()
+    // Docker Engine 29.x на этой машине отклоняет старую версию Docker API (1.32), которую
+    // testcontainers/docker-java по умолчанию использует при первичной проверке доступности
+    // демона — принудительно используем более новую версию API.
+    systemProperty("api.version", "1.41")
 }
 
 application {

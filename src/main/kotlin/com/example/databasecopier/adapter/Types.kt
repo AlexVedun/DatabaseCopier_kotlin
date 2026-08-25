@@ -1,0 +1,24 @@
+package com.example.databasecopier.adapter
+
+import kotlinx.serialization.json.JsonElement
+
+enum class DbType { MYSQL, POSTGRESQL, SQLSERVER, SQLITE }
+
+data class ConnectionConfig(
+    val type: DbType,
+    val host: String? = null,
+    val port: Int? = null,
+    val database: String,
+    val username: String? = null,
+    val password: String? = null,
+)
+
+enum class LogicalType { INTEGER, BIGINT, VARCHAR, TEXT, DECIMAL, BOOLEAN, DATE, DATETIME, JSON, UUID }
+
+data class ColumnDef(val name: String, val type: LogicalType, val nullable: Boolean)
+
+data class TableStructure(val name: String, val columns: List<ColumnDef>, val primaryKey: List<String>)
+
+data class ForeignKeyRef(val columnName: String, val referencedTable: String, val referencedColumn: String)
+
+data class BatchResult(val rows: List<Map<String, Any?>>, val nextCursor: JsonElement?)
