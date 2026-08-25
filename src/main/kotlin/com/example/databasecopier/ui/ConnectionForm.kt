@@ -11,17 +11,18 @@ import javafx.scene.layout.GridPane
 
 /**
  * Общая форма подключения к БД (тип/host/port/database/username/password + кнопка проверки),
- * переиспользуется SourcePanelController и TargetPanelController — только живые БД
- * (MySQL/PostgreSQL на этом шаге), без выбора SQL-дампа.
+ * переиспользуется SourcePanelController и TargetPanelController. Для SQLite поле "Database"
+ * служит путём к файлу .sqlite — host/port/username/password в этом случае не используются
+ * (buildJdbcUrl игнорирует их для DbType.SQLITE), их можно оставить пустыми.
  */
 class ConnectionForm {
     val dbTypeCombo: ComboBox<DbType> = ComboBox<DbType>().apply {
-        items.addAll(DbType.MYSQL, DbType.POSTGRESQL)
+        items.addAll(DbType.MYSQL, DbType.POSTGRESQL, DbType.SQLITE)
         value = DbType.MYSQL
     }
     val hostField = TextField().apply { promptText = "host" }
     val portField = TextField().apply { promptText = "port" }
-    val databaseField = TextField().apply { promptText = "database" }
+    val databaseField = TextField().apply { promptText = "database (для SQLite — путь к файлу)" }
     val usernameField = TextField().apply { promptText = "username" }
     val passwordField = PasswordField().apply { promptText = "password" }
     val testButton = Button("Проверить подключение")

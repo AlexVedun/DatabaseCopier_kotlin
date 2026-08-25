@@ -30,7 +30,24 @@ object TypeMapper {
                 t == "uuid" -> LogicalType.UUID
                 else -> LogicalType.TEXT
             }
-            DbType.SQLSERVER, DbType.SQLITE -> LogicalType.TEXT // не используется до Шага 8/9
+            DbType.SQLITE -> when {
+                // SQLite динамически типизировано — колонка может хранить объявленный тип как
+                // произвольную строку (в т.ч. пустую). Классифицируем по тем же эвристикам
+                // "type affinity", что использует сам SQLite, вместо точного соответствия.
+                t.isBlank() -> LogicalType.TEXT
+                t.contains("bool") -> LogicalType.BOOLEAN
+                t.contains("int") -> LogicalType.INTEGER
+                t.contains("char") || t.contains("clob") -> LogicalType.VARCHAR
+                t.contains("text") -> LogicalType.TEXT
+                t.contains("json") -> LogicalType.JSON
+                t.contains("uuid") -> LogicalType.UUID
+                t == "date" -> LogicalType.DATE
+                t.contains("datetime") || t.contains("timestamp") -> LogicalType.DATETIME
+                t.contains("decimal") || t.contains("numeric") || t.contains("real") ||
+                    t.contains("floa") || t.contains("doub") -> LogicalType.DECIMAL
+                else -> LogicalType.TEXT
+            }
+            DbType.SQLSERVER -> LogicalType.TEXT // не используется до Шага 9
         }
     }
 
@@ -59,6 +76,13 @@ object TypeMapper {
             LogicalType.JSON -> "JSONB"
             LogicalType.UUID -> "UUID"
         }
-        DbType.SQLSERVER, DbType.SQLITE -> "TEXT" // не используется до Шага 8/9
+        DbType.SQLITE -> when (type) {
+            LogicalType.INTEGER, LogicalType.BIGINT -> "INTEGER"
+            LogicalType.BOOLEAN -> "INTEGER"
+            LogicalType.VARCHAR, LogicalType.TEXT, LogicalType.DATE, LogicalType.DATETIME,
+            LogicalType.JSON, LogicalType.UUID -> "TEXT"
+            LogicalType.DECIMAL -> "NUMERIC"
+        }
+        DbType.SQLSERVER -> "TEXT" // не используется до Шага 9
     }
 }

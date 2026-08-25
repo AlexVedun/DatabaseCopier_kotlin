@@ -51,7 +51,11 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
     }
 
     override fun tableExists(table: String): Boolean {
-        val sql = "SELECT table_name FROM information_schema.tables WHERE table_name = ? AND ${schemaClause()}"
+        val sql = if (config.type == DbType.SQLITE) {
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?"
+        } else {
+            "SELECT table_name FROM information_schema.tables WHERE table_name = ? AND ${schemaClause()}"
+        }
         connection.prepareStatement(sql).use { ps ->
             ps.setString(1, table)
             ps.executeQuery().use { rs -> return rs.next() }
@@ -90,7 +94,7 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
 
     private fun quote(identifier: String): String = when (config.type) {
         DbType.MYSQL -> "`$identifier`"
-        DbType.POSTGRESQL -> "\"$identifier\""
+        DbType.POSTGRESQL, DbType.SQLITE -> "\"$identifier\""
         else -> identifier
     }
 

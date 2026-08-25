@@ -17,9 +17,11 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
     }
 
     override fun listTables(): Map<String, Long?> {
-        val schemaFilter = schemaClause()
-        val sql = "SELECT table_name FROM information_schema.tables " +
-            "WHERE table_type = 'BASE TABLE' AND $schemaFilter"
+        val sql = if (config.type == DbType.SQLITE) {
+            "SELECT name AS table_name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'"
+        } else {
+            "SELECT table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND ${schemaClause()}"
+        }
         val result = LinkedHashMap<String, Long?>()
         connection.createStatement().use { stmt ->
             stmt.executeQuery(sql).use { rs ->
@@ -33,6 +35,8 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
     }
 
     override fun getTableStructure(table: String): TableStructure {
+        if (config.type == DbType.SQLITE) return getSqliteTableStructure(table)
+
         val columns = mutableListOf<ColumnDef>()
         val columnsSql = "SELECT column_name, data_type, is_nullable FROM information_schema.columns " +
             "WHERE table_name = ? AND ${schemaClause()} ORDER BY ordinal_position"
@@ -71,7 +75,49 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
         return TableStructure(table, columns, primaryKey)
     }
 
+    /** SQLite не поддерживает `information_schema` — структура читается через `PRAGMA table_info`. */
+    private fun getSqliteTableStructure(table: String): TableStructure {
+        val columns = mutableListOf<ColumnDef>()
+        val pkPositions = mutableListOf<Pair<Int, String>>()
+        connection.createStatement().use { stmt ->
+            stmt.executeQuery("PRAGMA table_info(${quote(table)})").use { rs ->
+                while (rs.next()) {
+                    val name = rs.getString("name")
+                    columns.add(
+                        ColumnDef(
+                            name = name,
+                            type = TypeMapper.fromSqlType(DbType.SQLITE, rs.getString("type") ?: ""),
+                            nullable = rs.getInt("notnull") == 0,
+                        )
+                    )
+                    val pk = rs.getInt("pk")
+                    if (pk > 0) pkPositions.add(pk to name)
+                }
+            }
+        }
+        val primaryKey = pkPositions.sortedBy { it.first }.map { it.second }
+        return TableStructure(table, columns, primaryKey)
+    }
+
     override fun getForeignKeys(table: String): List<ForeignKeyRef> {
+        if (config.type == DbType.SQLITE) {
+            val result = mutableListOf<ForeignKeyRef>()
+            connection.createStatement().use { stmt ->
+                stmt.executeQuery("PRAGMA foreign_key_list(${quote(table)})").use { rs ->
+                    while (rs.next()) {
+                        result.add(
+                            ForeignKeyRef(
+                                columnName = rs.getString("from"),
+                                referencedTable = rs.getString("table"),
+                                referencedColumn = rs.getString("to"),
+                            )
+                        )
+                    }
+                }
+            }
+            return result
+        }
+
         val sql = when (config.type) {
             DbType.MYSQL ->
                 "SELECT column_name, referenced_table_name AS referenced_table, referenced_column_name AS referenced_column " +
@@ -226,7 +272,7 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
 
     private fun quote(identifier: String): String = when (config.type) {
         DbType.MYSQL -> "`$identifier`"
-        DbType.POSTGRESQL -> "\"$identifier\""
+        DbType.POSTGRESQL, DbType.SQLITE -> "\"$identifier\""
         else -> identifier
     }
 
