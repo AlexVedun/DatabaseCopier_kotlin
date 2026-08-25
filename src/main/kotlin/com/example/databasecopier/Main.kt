@@ -8,6 +8,8 @@ import javafx.stage.Stage
 
 class DatabaseCopierApp : Application() {
     override fun start(stage: Stage) {
+        initAppDatabase()
+
         val root = StackPane(Label("Database Copier - Hello World"))
         val scene = Scene(root, 400.0, 300.0)
 
