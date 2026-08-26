@@ -186,6 +186,13 @@ abstract class JdbcAdapterTestBase {
         assertTrue(structure.indexes[0].unique)
         assertEquals(listOf("email"), structure.indexes[0].columns)
 
+        // Индекс переносится под тем же именем, что и у источника (без префикса таблицей) — раз
+        // source/target здесь физически одна и та же БД (только в этом тесте, не в реальном
+        // использовании), исходную таблицу нужно убрать до создания одноимённого индекса на
+        // target, иначе имя будет занято собственным индексом idx_src, что и есть настоящая
+        // коллизия имён между двумя разными таблицами одной БД.
+        rawConnection.createStatement().use { stmt -> stmt.execute("DROP TABLE idx_src") }
+
         target.createTable(structure.copy(name = "idx_target"))
         target.insertBatch("idx_target", listOf(mapOf("id" to 1, "email" to "a@example.com")))
         target.createIndexesAndConstraints(structure.copy(name = "idx_target"))
@@ -200,10 +207,58 @@ abstract class JdbcAdapterTestBase {
         }
         assertTrue(duplicateInsertFails, "unique index должен запретить вставку дубликата email")
 
-        rawConnection.createStatement().use { stmt ->
-            stmt.execute("DROP TABLE idx_target")
-            stmt.execute("DROP TABLE idx_src")
+        rawConnection.createStatement().use { stmt -> stmt.execute("DROP TABLE idx_target") }
+    }
+
+    @Test
+    fun `raises a clear error when two different tables have an index with the same name`() {
+        // Индексы схемо-уникальны в Postgres — коллизия имени между РАЗНЫМИ таблицами структурно
+        // возможна только там (MySQL/MSSQL скопируют оба индекса без конфликта, т.к. там имя
+        // индекса уникально в рамках одной таблицы; SQLite тоже уникально в рамках БД, но
+        // множественные конкурентные соединения к одному файлу в этом тесте дают нестабильный
+        // "database is locked" — не стоит того ради дублирующей проверки той же семантики).
+        assumeTrue(config().type == DbType.POSTGRESQL)
+
+        target.createTable(TableStructure("clash_a", listOf(ColumnDef("id", LogicalType.INTEGER, false)), listOf("id")))
+        target.createTable(TableStructure("clash_b", listOf(ColumnDef("id", LogicalType.INTEGER, false)), listOf("id")))
+
+        val indexOnA = TableStructure(
+            "clash_a",
+            listOf(ColumnDef("id", LogicalType.INTEGER, false)),
+            listOf("id"),
+            indexes = listOf(IndexDef("shared_idx_name", listOf("id"), unique = false)),
+        )
+        val indexOnB = indexOnA.copy(name = "clash_b")
+
+        target.createIndexesAndConstraints(indexOnA)
+        val ex = org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException::class.java) {
+            target.createIndexesAndConstraints(indexOnB)
         }
+        assertTrue(ex.message?.contains("shared_idx_name") == true, "error should name the conflicting object: ${ex.message}")
+        assertTrue(ex.message?.contains("clash_a") == true, "error should name the table that already owns it: ${ex.message}")
+
+        rawConnection.createStatement().use { stmt ->
+            stmt.execute("DROP TABLE clash_a")
+            stmt.execute("DROP TABLE clash_b")
+        }
+    }
+
+    @Test
+    fun `calling createIndexesAndConstraints twice for the same table is a safe no-op retry`() {
+        target.createTable(TableStructure("retry_a", listOf(ColumnDef("id", LogicalType.INTEGER, false)), listOf("id")))
+        val structure = TableStructure(
+            "retry_a",
+            listOf(ColumnDef("id", LogicalType.INTEGER, false)),
+            listOf("id"),
+            indexes = listOf(IndexDef("retry_idx_name", listOf("id"), unique = false)),
+        )
+
+        target.createIndexesAndConstraints(structure)
+        // Тот же вызов для той же таблицы — эмуляция повторного запуска после падения где-то
+        // дальше в сессии — не должен бросить исключение.
+        target.createIndexesAndConstraints(structure)
+
+        rawConnection.createStatement().use { stmt -> stmt.execute("DROP TABLE retry_a") }
     }
 
     @Test
@@ -221,6 +276,9 @@ abstract class JdbcAdapterTestBase {
         }
 
         val structure = source.getTableStructure("idx_retry")
+        // См. комментарий в тесте про индексы выше — исходную таблицу нужно убрать перед
+        // созданием одноимённых индекса/CHECK на target (иначе это настоящая коллизия имён).
+        rawConnection.createStatement().use { stmt -> stmt.execute("DROP TABLE idx_retry") }
         target.createTable(structure.copy(name = "idx_retry_target"))
 
         target.createIndexesAndConstraints(structure.copy(name = "idx_retry_target"))
@@ -228,15 +286,16 @@ abstract class JdbcAdapterTestBase {
         target.createIndexesAndConstraints(structure.copy(name = "idx_retry_target"))
 
         rawConnection.createStatement().use { stmt -> stmt.execute("DROP TABLE idx_retry_target") }
-        rawConnection.createStatement().use { stmt -> stmt.execute("DROP TABLE idx_retry") }
     }
 
     @Test
     fun `truncates a generated index name that would exceed the target identifier length limit`() {
-        // Имя индекса на target собирается как "имя_таблицы_имя_индекса" (Шаг 11) — с достаточно
-        // длинным исходным именем это реально превышает лимит идентификатора (64 у MySQL, 63 у
-        // Postgres) и раньше валилось с ошибкой "Identifier name '...' is too long".
-        val longIndexName = "i".repeat(60)
+        // Имя индекса переносится как есть (см. `надо копировать имена индексов как есть`), но
+        // само по себе всё равно может превышать лимит идентификатора СУБД (64 у MySQL, 63 у
+        // Postgres) — это уже физическое ограничение целевой БД, а не решение о префиксации.
+        // Ровно 64 символа: превышает лимит Postgres (63, там сработает truncation), но всё ещё
+        // помещается в лимит MySQL (64) на источнике — иначе исходную таблицу не создать вообще.
+        val longIndexName = "i".repeat(64)
         rawConnection.createStatement().use { stmt ->
             stmt.execute("CREATE TABLE idx_long (id INTEGER PRIMARY KEY, email VARCHAR(100))")
             stmt.execute("CREATE INDEX $longIndexName ON idx_long (email)")
@@ -245,13 +304,14 @@ abstract class JdbcAdapterTestBase {
         val structure = source.getTableStructure("idx_long")
         assertEquals(1, structure.indexes.size)
 
+        // См. комментарий в тесте про индексы выше — исходную таблицу нужно убрать перед
+        // созданием одноимённого индекса на target (иначе это настоящая коллизия имён).
+        rawConnection.createStatement().use { stmt -> stmt.execute("DROP TABLE idx_long") }
+
         target.createTable(structure.copy(name = "idx_long_target"))
         target.createIndexesAndConstraints(structure.copy(name = "idx_long_target"))
 
-        rawConnection.createStatement().use { stmt ->
-            stmt.execute("DROP TABLE idx_long_target")
-            stmt.execute("DROP TABLE idx_long")
-        }
+        rawConnection.createStatement().use { stmt -> stmt.execute("DROP TABLE idx_long_target") }
     }
 
     @Test
@@ -269,6 +329,10 @@ abstract class JdbcAdapterTestBase {
         assertEquals(1, structure.checkConstraints.size)
         assertTrue(structure.checkConstraints[0].expression.contains("amount"))
 
+        // См. комментарий в тесте про индексы выше — source/target здесь одна и та же БД только
+        // в рамках теста, исходную таблицу нужно убрать перед созданием одноимённого CHECK.
+        rawConnection.createStatement().use { stmt -> stmt.execute("DROP TABLE chk_src") }
+
         target.createTable(structure.copy(name = "chk_target"))
         target.insertBatch("chk_target", listOf(mapOf("id" to 1, "amount" to 10)))
         target.createIndexesAndConstraints(structure.copy(name = "chk_target"))
@@ -283,10 +347,7 @@ abstract class JdbcAdapterTestBase {
         }
         assertTrue(invalidInsertFails, "CHECK-ограничение должно запретить вставку amount <= 0")
 
-        rawConnection.createStatement().use { stmt ->
-            stmt.execute("DROP TABLE chk_target")
-            stmt.execute("DROP TABLE chk_src")
-        }
+        rawConnection.createStatement().use { stmt -> stmt.execute("DROP TABLE chk_target") }
     }
 
     @Test

@@ -170,27 +170,66 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
             for (idx in structure.indexes) {
                 val uniqueSql = if (idx.unique) "UNIQUE " else ""
                 val cols = idx.columns.joinToString(", ") { quote(it) }
-                // Имя индекса префиксуется именем таблицы: в Postgres/MSSQL имена индексов должны
-                // быть уникальны в рамках схемы, а не только таблицы — исходное имя источника
-                // само по себе такой гарантии не даёт.
-                executeIgnoringDuplicate(
+                // Имя переносится как есть (только санация длины, см. safeIdentifier) — по
+                // требованию: если два разных объекта источника конфликтуют по имени на target
+                // (в Postgres/MSSQL имена индексов схемо-уникальны), это реальная проблема данных
+                // источника и должна быть видна пользователю, а не молча замаскирована префиксом.
+                val name = safeIdentifier(idx.name)
+                executeCreateOrDetectCollision(
                     stmt,
-                    "CREATE ${uniqueSql}INDEX ${quote(safeIdentifier("${structure.name}_${idx.name}"))} ON ${quote(structure.name)} ($cols)"
+                    "CREATE ${uniqueSql}INDEX ${quote(name)} ON ${quote(structure.name)} ($cols)",
+                    objectLabel = "Индекс",
+                    objectName = name,
+                    ownerTable = structure.name,
+                    lookupOwner = ::existingIndexOwner,
                 )
             }
             // SQLite не поддерживает ALTER TABLE ADD CONSTRAINT CHECK — CHECK там можно задать
             // только в момент CREATE TABLE, которое createTable() (пока) не делает; пропускаем.
             if (config.type != DbType.SQLITE) {
                 for (chk in structure.checkConstraints) {
-                    executeIgnoringDuplicate(
+                    val name = safeIdentifier(chk.name)
+                    executeCreateOrDetectCollision(
                         stmt,
-                        "ALTER TABLE ${quote(structure.name)} ADD CONSTRAINT ${quote(safeIdentifier("${structure.name}_${chk.name}"))} " +
-                            "CHECK (${chk.expression})"
+                        "ALTER TABLE ${quote(structure.name)} ADD CONSTRAINT ${quote(name)} CHECK (${chk.expression})",
+                        objectLabel = "CHECK-ограничение",
+                        objectName = name,
+                        ownerTable = structure.name,
+                        lookupOwner = ::existingCheckConstraintOwner,
                     )
                 }
             }
         }
         connection.commit()
+    }
+
+    private fun existingIndexOwner(name: String): String? {
+        val sql = when (config.type) {
+            DbType.MYSQL -> "SELECT table_name FROM information_schema.statistics WHERE index_name = ? AND table_schema = database() LIMIT 1"
+            DbType.POSTGRESQL ->
+                "SELECT tc.relname AS table_name FROM pg_class ic " +
+                    "JOIN pg_index ix ON ix.indexrelid = ic.oid JOIN pg_class tc ON tc.oid = ix.indrelid WHERE ic.relname = ?"
+            DbType.SQLSERVER -> "SELECT t.name AS table_name FROM sys.indexes i JOIN sys.tables t ON t.object_id = i.object_id WHERE i.name = ?"
+            DbType.SQLITE -> "SELECT tbl_name AS table_name FROM sqlite_master WHERE type = 'index' AND name = ?"
+        }
+        connection.prepareStatement(sql).use { ps ->
+            ps.setString(1, name)
+            ps.executeQuery().use { rs -> return if (rs.next()) rs.getString("table_name") else null }
+        }
+    }
+
+    private fun existingCheckConstraintOwner(name: String): String? {
+        val sql = when (config.type) {
+            DbType.MYSQL, DbType.POSTGRESQL ->
+                "SELECT table_name FROM information_schema.table_constraints WHERE constraint_name = ? AND ${schemaClause()}"
+            DbType.SQLSERVER ->
+                "SELECT t.name AS table_name FROM sys.check_constraints cc JOIN sys.tables t ON cc.parent_object_id = t.object_id WHERE cc.name = ?"
+            DbType.SQLITE -> return null // CHECK на SQLite не создаются вообще, сюда не дойдёт
+        }
+        connection.prepareStatement(sql).use { ps ->
+            ps.setString(1, name)
+            ps.executeQuery().use { rs -> return if (rs.next()) rs.getString("table_name") else null }
+        }
     }
 
     override fun createForeignKeys(table: String, foreignKeys: List<ForeignKeyRef>) {
@@ -212,31 +251,65 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
 
     // createIndexesAndConstraints()/createForeignKeys() помечаются "скопировано" только по успеху
     // ВСЕГО набора (indexesCopied/foreignKeysCopied) — если один из объектов на середине списка
-    // упал (например, на конфликте имени, как identifier-too-long раньше), повторный запуск
-    // выполняет всю функцию заново, включая уже успешно созданные объекты. В отличие от таблиц/view
-    // (DROP ... IF EXISTS + CREATE), для индексов/CHECK/FK нет одного портируемого "пересоздать
-    // безусловно" синтаксиса на все 4 СУБД — поэтому вместо этого просто пропускаем конфликт
-    // "уже существует" как признак повторного запуска, а не настоящую ошибку данных.
-    private fun executeIgnoringDuplicate(stmt: Statement, sql: String) {
-        // В Postgres (в отличие от MySQL/SQLite/MSSQL) ЛЮБАЯ ошибка внутри транзакции "отравляет"
-        // всю транзакцию — все следующие statement'ы на этом же соединении падают с "current
-        // transaction is aborted" до явного ROLLBACK, даже если сама ошибка была безобидной
-        // ("уже существует"). SAVEPOINT перед каждым statement'ом даёт возможность откатиться
-        // только до него, не теряя предыдущие успешно выполненные statement'ы в той же транзакции.
-        // Только для Postgres: MySQL выполняет implicit commit на каждом DDL (CREATE INDEX/
-        // ALTER TABLE), который сам уничтожает savepoint ещё до releaseSavepoint() — там (и в
-        // SQLite/MSSQL, где ошибка одного statement'а не блокирует остальные в транзакции)
-        // savepoint не нужен и только мешает.
+    // упал, повторный запуск выполняет всю функцию заново, включая уже успешно созданные объекты
+    // и ловит "уже существует" на них. Это ожидаемый повторный запуск, а не ошибка — но раз имена
+    // индексов/CHECK теперь переносятся как есть (без префикса таблицей), нужно отличать его от
+    // настоящего конфликта: два РАЗНЫХ объекта источника (из разных таблиц) с одинаковым именем.
+    // Различаем через lookupOwner: если существующий на target объект принадлежит ТОЙ ЖЕ таблице —
+    // это наш же повтор, пропускаем; если другой — это ошибка данных источника, поднимаем явно.
+    private fun executeCreateOrDetectCollision(
+        stmt: Statement,
+        sql: String,
+        objectLabel: String,
+        objectName: String,
+        ownerTable: String,
+        lookupOwner: (String) -> String?,
+    ) {
         val savepoint = if (config.type == DbType.POSTGRESQL) connection.setSavepoint() else null
         try {
             stmt.execute(sql)
             if (savepoint != null) connection.releaseSavepoint(savepoint)
         } catch (e: SQLException) {
             if (savepoint != null) connection.rollback(savepoint)
-            val msg = e.message?.lowercase() ?: ""
-            val isDuplicate = "duplicate" in msg || "already exists" in msg || "there is already an object" in msg
-            if (!isDuplicate) throw e
+            if (!looksLikeDuplicate(e)) throw e
+
+            val existingOwner = lookupOwner(objectName)
+            if (existingOwner != null && existingOwner.equals(ownerTable, ignoreCase = true)) {
+                return // тот же объект той же таблицы — это наш же повторный запуск, а не ошибка
+            }
+            throw IllegalStateException(
+                "$objectLabel с именем '$objectName' уже существует на target" +
+                    (existingOwner?.let { " (принадлежит таблице '$it')" } ?: "") +
+                    ", а копируемая таблица — '$ownerTable'. В исходной БД есть два разных объекта " +
+                    "с одинаковым именем '$objectName' — переименуйте один из них в источнике.",
+                e,
+            )
         }
+    }
+
+    // FK-имя всегда синтезируется как "fk_<table>_<column>_<index>" (у ForeignKeyRef нет
+    // исходного имени constraint'а — см. Шаг 9) и потому уже детерминированно уникально между
+    // разными таблицами; конфликт по такому имени может возникнуть только при повторном запуске
+    // для ТОЙ ЖЕ таблицы, so owner-проверка здесь не нужна.
+    private fun executeIgnoringDuplicate(stmt: Statement, sql: String) {
+        val savepoint = if (config.type == DbType.POSTGRESQL) connection.setSavepoint() else null
+        try {
+            stmt.execute(sql)
+            if (savepoint != null) connection.releaseSavepoint(savepoint)
+        } catch (e: SQLException) {
+            if (savepoint != null) connection.rollback(savepoint)
+            if (!looksLikeDuplicate(e)) throw e
+        }
+    }
+
+    // В Postgres (в отличие от MySQL/SQLite/MSSQL) ЛЮБАЯ ошибка внутри транзакции "отравляет" всю
+    // транзакцию — все следующие statement'ы на этом же соединении падают с "current transaction
+    // is aborted" до явного ROLLBACK. SAVEPOINT перед каждым statement'ом (см. вызовы выше) даёт
+    // откатиться только до него; для MySQL/SQLite/MSSQL savepoint не используется — MySQL делает
+    // implicit commit на каждом DDL, который сам уничтожает savepoint раньше releaseSavepoint().
+    private fun looksLikeDuplicate(e: SQLException): Boolean {
+        val msg = e.message?.lowercase() ?: ""
+        return "duplicate" in msg || "already exists" in msg || "there is already an object" in msg
     }
 
     private fun actionSql(action: ReferentialAction): String = when (action) {
