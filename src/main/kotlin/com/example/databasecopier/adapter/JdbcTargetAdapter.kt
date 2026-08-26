@@ -2,6 +2,8 @@ package com.example.databasecopier.adapter
 
 import java.sql.Connection
 import java.sql.DriverManager
+import java.sql.SQLException
+import java.sql.Statement
 import java.security.MessageDigest
 
 class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
@@ -171,13 +173,17 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
                 // Имя индекса префиксуется именем таблицы: в Postgres/MSSQL имена индексов должны
                 // быть уникальны в рамках схемы, а не только таблицы — исходное имя источника
                 // само по себе такой гарантии не даёт.
-                stmt.execute("CREATE ${uniqueSql}INDEX ${quote(safeIdentifier("${structure.name}_${idx.name}"))} ON ${quote(structure.name)} ($cols)")
+                executeIgnoringDuplicate(
+                    stmt,
+                    "CREATE ${uniqueSql}INDEX ${quote(safeIdentifier("${structure.name}_${idx.name}"))} ON ${quote(structure.name)} ($cols)"
+                )
             }
             // SQLite не поддерживает ALTER TABLE ADD CONSTRAINT CHECK — CHECK там можно задать
             // только в момент CREATE TABLE, которое createTable() (пока) не делает; пропускаем.
             if (config.type != DbType.SQLITE) {
                 for (chk in structure.checkConstraints) {
-                    stmt.execute(
+                    executeIgnoringDuplicate(
+                        stmt,
                         "ALTER TABLE ${quote(structure.name)} ADD CONSTRAINT ${quote(safeIdentifier("${structure.name}_${chk.name}"))} " +
                             "CHECK (${chk.expression})"
                     )
@@ -198,10 +204,39 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
                 val sql = "ALTER TABLE ${quote(table)} ADD CONSTRAINT ${quote(constraintName)} " +
                     "FOREIGN KEY (${quote(fk.columnName)}) REFERENCES ${quote(fk.referencedTable)} (${quote(fk.referencedColumn)}) " +
                     "ON DELETE ${actionSql(fk.onDelete)} ON UPDATE ${actionSql(fk.onUpdate)}"
-                stmt.execute(sql)
+                executeIgnoringDuplicate(stmt, sql)
             }
         }
         connection.commit()
+    }
+
+    // createIndexesAndConstraints()/createForeignKeys() помечаются "скопировано" только по успеху
+    // ВСЕГО набора (indexesCopied/foreignKeysCopied) — если один из объектов на середине списка
+    // упал (например, на конфликте имени, как identifier-too-long раньше), повторный запуск
+    // выполняет всю функцию заново, включая уже успешно созданные объекты. В отличие от таблиц/view
+    // (DROP ... IF EXISTS + CREATE), для индексов/CHECK/FK нет одного портируемого "пересоздать
+    // безусловно" синтаксиса на все 4 СУБД — поэтому вместо этого просто пропускаем конфликт
+    // "уже существует" как признак повторного запуска, а не настоящую ошибку данных.
+    private fun executeIgnoringDuplicate(stmt: Statement, sql: String) {
+        // В Postgres (в отличие от MySQL/SQLite/MSSQL) ЛЮБАЯ ошибка внутри транзакции "отравляет"
+        // всю транзакцию — все следующие statement'ы на этом же соединении падают с "current
+        // transaction is aborted" до явного ROLLBACK, даже если сама ошибка была безобидной
+        // ("уже существует"). SAVEPOINT перед каждым statement'ом даёт возможность откатиться
+        // только до него, не теряя предыдущие успешно выполненные statement'ы в той же транзакции.
+        // Только для Postgres: MySQL выполняет implicit commit на каждом DDL (CREATE INDEX/
+        // ALTER TABLE), который сам уничтожает savepoint ещё до releaseSavepoint() — там (и в
+        // SQLite/MSSQL, где ошибка одного statement'а не блокирует остальные в транзакции)
+        // savepoint не нужен и только мешает.
+        val savepoint = if (config.type == DbType.POSTGRESQL) connection.setSavepoint() else null
+        try {
+            stmt.execute(sql)
+            if (savepoint != null) connection.releaseSavepoint(savepoint)
+        } catch (e: SQLException) {
+            if (savepoint != null) connection.rollback(savepoint)
+            val msg = e.message?.lowercase() ?: ""
+            val isDuplicate = "duplicate" in msg || "already exists" in msg || "there is already an object" in msg
+            if (!isDuplicate) throw e
+        }
     }
 
     private fun actionSql(action: ReferentialAction): String = when (action) {

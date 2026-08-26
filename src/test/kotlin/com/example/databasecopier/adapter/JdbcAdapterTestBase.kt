@@ -207,6 +207,31 @@ abstract class JdbcAdapterTestBase {
     }
 
     @Test
+    fun `calling createIndexesAndConstraints twice does not fail on already-existing objects`() {
+        // indexesCopied выставляется только по успеху ВСЕГО набора индексов/CHECK для таблицы —
+        // если сессия падает ПОСЛЕ частичного создания (например, на другой таблице/шаге) и потом
+        // перезапускается, эта функция вызывается заново с теми же объектами. Раньше это падало с
+        // "Duplicate key name"/"Duplicate CHECK constraint name" вместо того, чтобы просто
+        // пропустить уже существующие индекс/ограничение.
+        rawConnection.createStatement().use { stmt ->
+            stmt.execute(
+                "CREATE TABLE idx_retry (id INTEGER PRIMARY KEY, email VARCHAR(100), amount INTEGER CHECK (amount > 0))"
+            )
+            stmt.execute("CREATE UNIQUE INDEX idx_retry_email ON idx_retry (email)")
+        }
+
+        val structure = source.getTableStructure("idx_retry")
+        target.createTable(structure.copy(name = "idx_retry_target"))
+
+        target.createIndexesAndConstraints(structure.copy(name = "idx_retry_target"))
+        // Повторный вызов не должен бросить исключение.
+        target.createIndexesAndConstraints(structure.copy(name = "idx_retry_target"))
+
+        rawConnection.createStatement().use { stmt -> stmt.execute("DROP TABLE idx_retry_target") }
+        rawConnection.createStatement().use { stmt -> stmt.execute("DROP TABLE idx_retry") }
+    }
+
+    @Test
     fun `truncates a generated index name that would exceed the target identifier length limit`() {
         // Имя индекса на target собирается как "имя_таблицы_имя_индекса" (Шаг 11) — с достаточно
         // длинным исходным именем это реально превышает лимит идентификатора (64 у MySQL, 63 у
@@ -341,6 +366,12 @@ abstract class JdbcAdapterTestBase {
         target.insertBatch("t_customers", listOf(mapOf("id" to 1)))
         target.insertBatch("t_orders", listOf(mapOf("id" to 100, "customer_id" to 1)))
 
+        target.createForeignKeys(
+            "t_orders",
+            listOf(ForeignKeyRef("customer_id", "t_customers", "id", onDelete = ReferentialAction.CASCADE))
+        )
+        // Повторный вызов (эмуляция retry после падения на другом шаге сессии) не должен упасть
+        // с "Duplicate foreign key constraint name" — конфликт "уже существует" здесь ожидаем.
         target.createForeignKeys(
             "t_orders",
             listOf(ForeignKeyRef("customer_id", "t_customers", "id", onDelete = ReferentialAction.CASCADE))
