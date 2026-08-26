@@ -31,10 +31,14 @@ class CopyRunner {
         val needsData = session.copyMode == "structure_and_data"
 
         try {
-            val tables = CopySessionRepository.getTables(sessionId)
-                .filter { it.isSelected && it.status != "done" && it.status != "skipped" }
+            val allSelected = CopySessionRepository.getTables(sessionId).filter { it.isSelected }
+            val pending = allSelected.filter { it.status != "done" && it.status != "skipped" }
 
-            for (table in tables) {
+            // FK-проверки отключаются на весь оставшийся ход сессии (переживает паузу/возобновление —
+            // включаются обратно только по успешном завершении всей сессии, см. Шаг 4/9 инструкции).
+            target.disableForeignKeyChecks()
+
+            for (table in pending) {
                 if (!isRunnable(sessionId)) return@withContext
 
                 var current = table
@@ -55,6 +59,19 @@ class CopyRunner {
                 emit(sessionId, current.copy(status = "done"))
             }
 
+            // FK создаются отдельным проходом ПОСЛЕ того, как все выбранные таблицы гарантированно
+            // существуют на target (иначе REFERENCES на ещё не созданную таблицу упадёт).
+            val selectedNames = allSelected.map { it.tableName }.toSet()
+            for (table in allSelected.filter { !it.foreignKeysCopied }) {
+                if (!isRunnable(sessionId)) return@withContext
+
+                val foreignKeys = source.getForeignKeys(table.tableName)
+                    .filter { it.referencedTable in selectedNames }
+                target.createForeignKeys(table.tableName, foreignKeys)
+                CopySessionRepository.markForeignKeysCopied(table.id)
+            }
+
+            target.enableForeignKeyChecks()
             CopySessionRepository.updateSessionStatus(sessionId, "completed")
         } catch (e: Exception) {
             CopySessionRepository.updateSessionStatus(sessionId, "failed", lastError = e.message)

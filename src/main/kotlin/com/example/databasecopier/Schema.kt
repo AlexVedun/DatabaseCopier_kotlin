@@ -44,6 +44,7 @@ object CopySessionTables : Table("copy_session_tables") {
     val rowsCopied = long("rows_copied").default(0)
     val cursorJson = text("cursor_json").nullable()
     val structureCopied = bool("structure_copied").default(false)
+    val foreignKeysCopied = bool("foreign_keys_copied").default(false)
 
     override val primaryKey = PrimaryKey(id)
 }

@@ -33,6 +33,31 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
         connection.commit()
     }
 
+    override fun createForeignKeys(table: String, foreignKeys: List<ForeignKeyRef>) {
+        // SQLite не поддерживает ADD CONSTRAINT FOREIGN KEY через ALTER TABLE — FK там можно
+        // задать только в момент CREATE TABLE. Осознанно пропускаем без ошибки: остальные
+        // СУБД получают полноценные FK-constraint'ы, для SQLite это известное ограничение.
+        if (foreignKeys.isEmpty() || config.type == DbType.SQLITE) return
+        connection.createStatement().use { stmt ->
+            for ((idx, fk) in foreignKeys.withIndex()) {
+                val constraintName = "fk_${table}_${fk.columnName}_$idx"
+                val sql = "ALTER TABLE ${quote(table)} ADD CONSTRAINT ${quote(constraintName)} " +
+                    "FOREIGN KEY (${quote(fk.columnName)}) REFERENCES ${quote(fk.referencedTable)} (${quote(fk.referencedColumn)}) " +
+                    "ON DELETE ${actionSql(fk.onDelete)} ON UPDATE ${actionSql(fk.onUpdate)}"
+                stmt.execute(sql)
+            }
+        }
+        connection.commit()
+    }
+
+    private fun actionSql(action: ReferentialAction): String = when (action) {
+        ReferentialAction.CASCADE -> "CASCADE"
+        ReferentialAction.SET_NULL -> "SET NULL"
+        ReferentialAction.RESTRICT -> "RESTRICT"
+        ReferentialAction.SET_DEFAULT -> "SET DEFAULT"
+        ReferentialAction.NO_ACTION -> "NO ACTION"
+    }
+
     override fun insertBatch(table: String, rows: List<Map<String, Any?>>) {
         if (rows.isEmpty()) return
         val columns = rows.first().keys.toList()

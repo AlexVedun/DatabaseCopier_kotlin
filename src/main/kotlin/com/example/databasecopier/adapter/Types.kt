@@ -19,6 +19,14 @@ data class ColumnDef(val name: String, val type: LogicalType, val nullable: Bool
 
 data class TableStructure(val name: String, val columns: List<ColumnDef>, val primaryKey: List<String>)
 
-data class ForeignKeyRef(val columnName: String, val referencedTable: String, val referencedColumn: String)
+enum class ReferentialAction { CASCADE, SET_NULL, RESTRICT, NO_ACTION, SET_DEFAULT }
+
+data class ForeignKeyRef(
+    val columnName: String,
+    val referencedTable: String,
+    val referencedColumn: String,
+    val onDelete: ReferentialAction = ReferentialAction.NO_ACTION,
+    val onUpdate: ReferentialAction = ReferentialAction.NO_ACTION,
+)
 
 data class BatchResult(val rows: List<Map<String, Any?>>, val nextCursor: JsonElement?)

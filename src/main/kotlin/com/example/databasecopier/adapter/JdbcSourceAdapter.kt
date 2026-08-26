@@ -110,6 +110,8 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
                                 columnName = rs.getString("from"),
                                 referencedTable = rs.getString("table"),
                                 referencedColumn = rs.getString("to"),
+                                onDelete = parseAction(rs.getString("on_delete")),
+                                onUpdate = parseAction(rs.getString("on_update")),
                             )
                         )
                     }
@@ -122,7 +124,8 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
             // У MSSQL INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE (в отличие от Postgres) отдаёт
             // constrained-сторону, а не referenced — поэтому FK читаем через системные каталоги.
             val result = mutableListOf<ForeignKeyRef>()
-            val sql = "SELECT cp.name AS column_name, tr.name AS referenced_table, cr.name AS referenced_column " +
+            val sql = "SELECT cp.name AS column_name, tr.name AS referenced_table, cr.name AS referenced_column, " +
+                "fk.delete_referential_action_desc AS on_delete, fk.update_referential_action_desc AS on_update " +
                 "FROM sys.foreign_keys fk " +
                 "JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id " +
                 "JOIN sys.tables tp ON fkc.parent_object_id = tp.object_id " +
@@ -139,6 +142,8 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
                                 columnName = rs.getString("column_name"),
                                 referencedTable = rs.getString("referenced_table"),
                                 referencedColumn = rs.getString("referenced_column"),
+                                onDelete = parseAction(rs.getString("on_delete")),
+                                onUpdate = parseAction(rs.getString("on_update")),
                             )
                         )
                     }
@@ -149,16 +154,23 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
 
         val sql = when (config.type) {
             DbType.MYSQL ->
-                "SELECT column_name, referenced_table_name AS referenced_table, referenced_column_name AS referenced_column " +
-                    "FROM information_schema.key_column_usage " +
-                    "WHERE table_name = ? AND referenced_table_name IS NOT NULL AND ${schemaClause()}"
+                "SELECT kcu.column_name, kcu.referenced_table_name AS referenced_table, " +
+                    "kcu.referenced_column_name AS referenced_column, rc.delete_rule AS on_delete, rc.update_rule AS on_update " +
+                    "FROM information_schema.key_column_usage kcu " +
+                    "JOIN information_schema.referential_constraints rc " +
+                    "  ON kcu.constraint_name = rc.constraint_name AND kcu.table_schema = rc.constraint_schema " +
+                    "  AND kcu.table_name = rc.table_name " +
+                    "WHERE kcu.table_name = ? AND kcu.referenced_table_name IS NOT NULL AND ${schemaClause("kcu")}"
             DbType.POSTGRESQL ->
-                "SELECT kcu.column_name, ccu.table_name AS referenced_table, ccu.column_name AS referenced_column " +
+                "SELECT kcu.column_name, ccu.table_name AS referenced_table, ccu.column_name AS referenced_column, " +
+                    "rc.delete_rule AS on_delete, rc.update_rule AS on_update " +
                     "FROM information_schema.table_constraints tc " +
                     "JOIN information_schema.key_column_usage kcu " +
                     "  ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema " +
                     "JOIN information_schema.constraint_column_usage ccu " +
                     "  ON tc.constraint_name = ccu.constraint_name AND tc.table_schema = ccu.table_schema " +
+                    "JOIN information_schema.referential_constraints rc " +
+                    "  ON tc.constraint_name = rc.constraint_name AND tc.table_schema = rc.constraint_schema " +
                     "WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_name = ? AND ${schemaClause("tc")}"
             else -> throw UnsupportedOperationException("getForeignKeys not implemented yet for ${config.type}")
         }
@@ -172,12 +184,23 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
                             columnName = rs.getString("column_name"),
                             referencedTable = rs.getString("referenced_table"),
                             referencedColumn = rs.getString("referenced_column"),
+                            onDelete = parseAction(rs.getString("on_delete")),
+                            onUpdate = parseAction(rs.getString("on_update")),
                         )
                     )
                 }
             }
         }
         return result
+    }
+
+    /** Приводит текстовое обозначение referential action (разное у каждой СУБД) к [ReferentialAction]. */
+    private fun parseAction(raw: String?): ReferentialAction = when (raw?.uppercase()?.replace("_", " ")) {
+        "CASCADE" -> ReferentialAction.CASCADE
+        "SET NULL" -> ReferentialAction.SET_NULL
+        "RESTRICT" -> ReferentialAction.RESTRICT
+        "SET DEFAULT" -> ReferentialAction.SET_DEFAULT
+        else -> ReferentialAction.NO_ACTION
     }
 
     override fun countRows(table: String): Long? {

@@ -86,16 +86,44 @@ class CopyRunnerTest {
         DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { conn ->
             conn.createStatement().use { stmt -> stmt.execute("DROP TABLE IF EXISTS items") }
         }
+
+        DriverManager.getConnection(mysql.jdbcUrl, mysql.username, mysql.password).use { conn ->
+            conn.createStatement().use { stmt ->
+                stmt.execute("DROP TABLE IF EXISTS fk_child")
+                stmt.execute("DROP TABLE IF EXISTS fk_parent")
+                stmt.execute("CREATE TABLE fk_parent (id INTEGER PRIMARY KEY)")
+                stmt.execute(
+                    "CREATE TABLE fk_child (id INTEGER PRIMARY KEY, parent_id INTEGER, " +
+                        "FOREIGN KEY (parent_id) REFERENCES fk_parent(id) ON DELETE CASCADE)"
+                )
+                stmt.execute("INSERT INTO fk_parent (id) VALUES (1)")
+                stmt.execute("INSERT INTO fk_child (id, parent_id) VALUES (100, 1)")
+            }
+        }
+        DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { conn ->
+            conn.createStatement().use { stmt ->
+                stmt.execute("DROP TABLE IF EXISTS fk_child")
+                stmt.execute("DROP TABLE IF EXISTS fk_parent")
+            }
+        }
     }
 
     @AfterEach
     fun tearDown() {
         serviceDbFile.delete()
         DriverManager.getConnection(mysql.jdbcUrl, mysql.username, mysql.password).use { conn ->
-            conn.createStatement().use { stmt -> stmt.execute("DROP TABLE IF EXISTS items") }
+            conn.createStatement().use { stmt ->
+                stmt.execute("DROP TABLE IF EXISTS items")
+                stmt.execute("DROP TABLE IF EXISTS fk_child")
+                stmt.execute("DROP TABLE IF EXISTS fk_parent")
+            }
         }
         DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { conn ->
-            conn.createStatement().use { stmt -> stmt.execute("DROP TABLE IF EXISTS items") }
+            conn.createStatement().use { stmt ->
+                stmt.execute("DROP TABLE IF EXISTS items")
+                stmt.execute("DROP TABLE IF EXISTS fk_child")
+                stmt.execute("DROP TABLE IF EXISTS fk_parent")
+            }
         }
     }
 
@@ -167,6 +195,49 @@ class CopyRunnerTest {
                     // PRIMARY KEY на items.id гарантирует: если бы строки первого батча были
                     // скопированы повторно, вставка упала бы с ошибкой дубликата ключа.
                     assertEquals(totalRows, rs.getInt(1))
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `creates foreign key with ON DELETE CASCADE on target after copying both tables`() = runBlocking {
+        val sessionId = CopySessionRepository.createSession(
+            name = "fk session",
+            sourceType = "connection",
+            sourceConnectionId = null,
+            sourceDumpPath = null,
+            sourceDumpDialect = null,
+            targetConnectionId = 1,
+            copyMode = "structure_and_data",
+            batchSize = batchSize,
+        )
+        // Порядок добавления таблиц в сессию намеренно "неправильный" (child раньше parent) —
+        // FK всё равно должен создаться корректно, т.к. создание FK идёт отдельным проходом
+        // после того, как ВСЕ таблицы уже существуют на target.
+        CopySessionRepository.addTable(sessionId, "fk_child")
+        CopySessionRepository.addTable(sessionId, "fk_parent")
+        CopySessionRepository.updateSessionStatus(sessionId, "running")
+
+        val source = JdbcSourceAdapter(sourceConfig).apply { connect() }
+        val target = JdbcTargetAdapter(targetConfig).apply { connect() }
+        try {
+            CopyRunner().run(sessionId, source, target)
+        } finally {
+            source.close()
+            target.close()
+        }
+
+        assertEquals("completed", CopySessionRepository.getSession(sessionId)!!.status)
+
+        DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { conn ->
+            conn.createStatement().use { stmt -> stmt.execute("DELETE FROM fk_parent WHERE id = 1") }
+            conn.createStatement().use { stmt ->
+                stmt.executeQuery("SELECT COUNT(*) FROM fk_child").use { rs ->
+                    rs.next()
+                    // Если бы FOREIGN KEY ... ON DELETE CASCADE не был реально создан на target,
+                    // строка fk_child осталась бы (или DELETE упал бы из-за отсутствия FK вообще).
+                    assertEquals(0, rs.getInt(1))
                 }
             }
         }

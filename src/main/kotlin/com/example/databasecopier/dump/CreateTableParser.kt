@@ -2,6 +2,7 @@ package com.example.databasecopier.dump
 
 import com.example.databasecopier.adapter.ColumnDef
 import com.example.databasecopier.adapter.ForeignKeyRef
+import com.example.databasecopier.adapter.ReferentialAction
 import com.example.databasecopier.adapter.TableStructure
 import com.example.databasecopier.adapter.TypeMapper
 
@@ -10,8 +11,18 @@ object CreateTableParser {
     private val NAME_REGEX = Regex("""(?is)create\s+table\s+(?:if\s+not\s+exists\s+)?[`"]?([\w]+)[`"]?\s*\(""")
     private val COLUMN_NAME_TYPE_REGEX = Regex("""^[`"]?([\w]+)[`"]?\s+([\w]+)(?:\s*\([^)]*\))?""")
     private val FK_REGEX = Regex(
-        """(?is)FOREIGN\s+KEY\s*\(\s*[`"]?([\w]+)[`"]?\s*\)\s*REFERENCES\s+[`"]?([\w]+)[`"]?\s*\(\s*[`"]?([\w]+)[`"]?\s*\)"""
+        """(?is)FOREIGN\s+KEY\s*\(\s*[`"]?([\w]+)[`"]?\s*\)\s*REFERENCES\s+[`"]?([\w]+)[`"]?\s*\(\s*[`"]?([\w]+)[`"]?\s*\)""" +
+            """(?:\s*ON\s+DELETE\s+(CASCADE|SET\s+NULL|RESTRICT|NO\s+ACTION|SET\s+DEFAULT))?""" +
+            """(?:\s*ON\s+UPDATE\s+(CASCADE|SET\s+NULL|RESTRICT|NO\s+ACTION|SET\s+DEFAULT))?"""
     )
+
+    private fun parseAction(raw: String?): ReferentialAction = when (raw?.uppercase()?.replace(Regex("\\s+"), " ")) {
+        "CASCADE" -> ReferentialAction.CASCADE
+        "SET NULL" -> ReferentialAction.SET_NULL
+        "RESTRICT" -> ReferentialAction.RESTRICT
+        "SET DEFAULT" -> ReferentialAction.SET_DEFAULT
+        else -> ReferentialAction.NO_ACTION
+    }
     private val SKIP_PREFIXES = listOf("KEY", "UNIQUE", "INDEX", "CONSTRAINT", "CHECK")
 
     data class Result(val structure: TableStructure, val foreignKeys: List<ForeignKeyRef>)
@@ -41,7 +52,15 @@ object CreateTableParser {
                 }
                 upper.contains("FOREIGN KEY") -> {
                     FK_REGEX.find(entry)?.let { m ->
-                        foreignKeys.add(ForeignKeyRef(m.groupValues[1], m.groupValues[2], m.groupValues[3]))
+                        foreignKeys.add(
+                            ForeignKeyRef(
+                                columnName = m.groupValues[1],
+                                referencedTable = m.groupValues[2],
+                                referencedColumn = m.groupValues[3],
+                                onDelete = parseAction(m.groupValues[4].ifBlank { null }),
+                                onUpdate = parseAction(m.groupValues[5].ifBlank { null }),
+                            )
+                        )
                     }
                 }
                 SKIP_PREFIXES.any { upper.startsWith(it) } -> {

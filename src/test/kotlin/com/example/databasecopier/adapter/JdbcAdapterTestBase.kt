@@ -4,6 +4,7 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import java.sql.Connection
@@ -82,6 +83,9 @@ abstract class JdbcAdapterTestBase {
         assertEquals("customer_id", fks[0].columnName)
         assertEquals("customers", fks[0].referencedTable)
         assertEquals("id", fks[0].referencedColumn)
+        // Фикстура не задаёт ON DELETE/ON UPDATE явно — все СУБД по умолчанию считают это NO ACTION.
+        assertEquals(ReferentialAction.NO_ACTION, fks[0].onDelete)
+        assertEquals(ReferentialAction.NO_ACTION, fks[0].onUpdate)
     }
 
     @Test
@@ -166,6 +170,49 @@ abstract class JdbcAdapterTestBase {
                 assertEquals(1, rs.getInt(1))
             }
             stmt.execute("DROP TABLE copy_target")
+        }
+    }
+
+    @Test
+    fun `creates foreign key constraint with referential action after both tables exist`() {
+        // SQLite не поддерживает ALTER TABLE ADD CONSTRAINT FOREIGN KEY — createForeignKeys()
+        // там осознанно no-op (см. JdbcTargetAdapter), проверять здесь нечего.
+        assumeTrue(config().type != DbType.SQLITE)
+
+        target.createTable(
+            TableStructure("t_customers", listOf(ColumnDef("id", LogicalType.INTEGER, nullable = false)), listOf("id"))
+        )
+        target.createTable(
+            TableStructure(
+                "t_orders",
+                listOf(
+                    ColumnDef("id", LogicalType.INTEGER, nullable = false),
+                    ColumnDef("customer_id", LogicalType.INTEGER, nullable = true),
+                ),
+                listOf("id"),
+            )
+        )
+        target.insertBatch("t_customers", listOf(mapOf("id" to 1)))
+        target.insertBatch("t_orders", listOf(mapOf("id" to 100, "customer_id" to 1)))
+
+        target.createForeignKeys(
+            "t_orders",
+            listOf(ForeignKeyRef("customer_id", "t_customers", "id", onDelete = ReferentialAction.CASCADE))
+        )
+
+        // Реальное поведение ON DELETE CASCADE доказывает, что constraint создался, а не просто
+        // не упал молча: удаление родителя должно каскадно удалить зависимую строку.
+        rawConnection.createStatement().use { stmt -> stmt.execute("DELETE FROM t_customers WHERE id = 1") }
+        rawConnection.createStatement().use { stmt ->
+            stmt.executeQuery("SELECT COUNT(*) FROM t_orders").use { rs ->
+                rs.next()
+                assertEquals(0, rs.getInt(1))
+            }
+        }
+
+        rawConnection.createStatement().use { stmt ->
+            stmt.execute("DROP TABLE t_orders")
+            stmt.execute("DROP TABLE t_customers")
         }
     }
 
