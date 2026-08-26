@@ -78,6 +78,14 @@ tasks.withType<JavaCompile> {
 // зависимостями (включая JavaFX-модули текущей платформы, которые javafx-плагин уже подключил
 // как обычные classpath-зависимости) — jpackage поддерживает только классический classpath-запуск
 // (--main-jar/--main-class), не модульный, поэтому JPMS module-info здесь не нужен.
+// Каждый JDBC-драйвер регистрирует себя через META-INF/services/java.sql.Driver — по умолчанию
+// shadowJar при слиянии jar'ов берёт только один такой файл (последний по порядку), из-за чего
+// ServiceLoader/DriverManager видит только один драйвер, а не все четыре. mergeServiceFiles()
+// вместо перезаписи объединяет содержимое одноимённых файлов META-INF/services/* из всех jar'ов.
+tasks.shadowJar {
+    mergeServiceFiles()
+}
+
 val jpackageInputDir = layout.buildDirectory.dir("jpackage-input")
 
 val prepareJpackageInput by tasks.registering(Sync::class) {
