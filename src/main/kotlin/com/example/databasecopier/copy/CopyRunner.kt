@@ -50,7 +50,13 @@ class CopyRunner {
                     current = current.copy(structureCopied = true)
                 }
 
-                if (needsData) {
+                // dataCopied — отдельный флаг от cursorJson: у полностью скопированной таблицы
+                // курсор тоже null (означает "данных больше нет"), что неотличимо от "копирование
+                // ещё не начиналось". Без этого флага повторный запуск (например, после падения
+                // на создании индекса/FK для другой таблицы уже ПОСЛЕ того, как эта таблица была
+                // полностью скопирована) читал бы с начала и падал на дубликате PK при вставке
+                // уже скопированных строк.
+                if (needsData && !current.dataCopied) {
                     val autoIncrementColumn = structure.columns.firstOrNull { it.autoIncrement }?.name
                     current = copyTableData(sessionId, current, source, target, session.batchSize, autoIncrementColumn)
                         ?: return@withContext // паузa/отмена внутри копирования данных таблицы
@@ -151,6 +157,9 @@ class CopyRunner {
         if (autoIncrementColumn != null && maxAutoIncrementValue != null) {
             target.syncAutoIncrement(current.tableName, autoIncrementColumn, maxAutoIncrementValue!!)
         }
+
+        CopySessionRepository.markDataCopied(current.id)
+        current = current.copy(dataCopied = true)
 
         return current
     }

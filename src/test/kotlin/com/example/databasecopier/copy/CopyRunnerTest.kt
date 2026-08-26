@@ -15,6 +15,7 @@ import org.jetbrains.exposed.sql.SchemaUtils
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -117,6 +118,7 @@ class CopyRunnerTest {
                 stmt.execute("DROP TABLE IF EXISTS items")
                 stmt.execute("DROP TABLE IF EXISTS fk_child")
                 stmt.execute("DROP TABLE IF EXISTS fk_parent")
+                stmt.execute("DROP TABLE IF EXISTS flaky")
             }
         }
         DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { conn ->
@@ -124,6 +126,7 @@ class CopyRunnerTest {
                 stmt.execute("DROP TABLE IF EXISTS items")
                 stmt.execute("DROP TABLE IF EXISTS fk_child")
                 stmt.execute("DROP TABLE IF EXISTS fk_parent")
+                stmt.execute("DROP TABLE IF EXISTS flaky")
             }
         }
     }
@@ -196,6 +199,100 @@ class CopyRunnerTest {
                     // PRIMARY KEY на items.id гарантирует: если бы строки первого батча были
                     // скопированы повторно, вставка упала бы с ошибкой дубликата ключа.
                     assertEquals(totalRows, rs.getInt(1))
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `resuming after data fully copied but a later step failed does not re-copy or duplicate rows`() = runBlocking {
+        // CHECK-ограничение с MySQL-специфичным REGEXP переносится на target как есть (см. Шаг 11
+        // инструкции — сложные выражения не транслируются между диалектами) и упадёт на Postgres
+        // (там нет оператора REGEXP), но только ПОСЛЕ того, как данные таблицы уже полностью
+        // скопированы — это и воспроизводит баг: cursorJson становится null и у "данные ещё не
+        // копировались", и у "данные скопированы полностью", если не различать их отдельным флагом.
+        val rowCount = 20
+        DriverManager.getConnection(mysql.jdbcUrl, mysql.username, mysql.password).use { conn ->
+            conn.createStatement().use { stmt ->
+                stmt.execute("DROP TABLE IF EXISTS flaky")
+                stmt.execute(
+                    "CREATE TABLE flaky (id INTEGER PRIMARY KEY, value VARCHAR(255) NOT NULL, " +
+                        "CHECK (value REGEXP '^value-'))"
+                )
+                for (i in 1..rowCount) stmt.execute("INSERT INTO flaky (id, value) VALUES ($i, 'value-$i')")
+            }
+        }
+        DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { conn ->
+            conn.createStatement().use { stmt -> stmt.execute("DROP TABLE IF EXISTS flaky") }
+        }
+
+        val sessionId = CopySessionRepository.createSession(
+            name = "flaky session",
+            sourceType = "connection",
+            sourceConnectionId = null,
+            sourceDumpPath = null,
+            sourceDumpDialect = null,
+            targetConnectionId = 1,
+            copyMode = "structure_and_data",
+            batchSize = batchSize,
+        )
+        CopySessionRepository.addTable(sessionId, "flaky")
+        CopySessionRepository.updateSessionStatus(sessionId, "running")
+
+        run {
+            val source = JdbcSourceAdapter(sourceConfig).apply { connect() }
+            val target = JdbcTargetAdapter(targetConfig).apply { connect() }
+            try {
+                CopyRunner().run(sessionId, source, target)
+            } finally {
+                source.close()
+                target.close()
+            }
+        }
+
+        val afterFirstRun = CopySessionRepository.getSession(sessionId)!!
+        assertEquals("failed", afterFirstRun.status)
+        val tableAfterFirstRun = CopySessionRepository.getTables(sessionId).first()
+        assertTrue(tableAfterFirstRun.dataCopied, "data should be fully copied despite the later CHECK failure")
+        assertEquals(rowCount.toLong(), tableAfterFirstRun.rowsCopied)
+
+        DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { conn ->
+            conn.createStatement().use { stmt ->
+                stmt.executeQuery("SELECT COUNT(*) FROM flaky").use { rs ->
+                    rs.next()
+                    assertEquals(rowCount, rs.getInt(1))
+                }
+            }
+        }
+
+        // Повторный запуск (как при нажатии "Запустить" после failed): без dataCopied-флага это
+        // упало бы с "Duplicate entry" при попытке вставить уже скопированные строки заново.
+        CopySessionRepository.updateSessionStatus(sessionId, "running")
+        run {
+            val source = JdbcSourceAdapter(sourceConfig).apply { connect() }
+            val target = JdbcTargetAdapter(targetConfig).apply { connect() }
+            try {
+                CopyRunner().run(sessionId, source, target)
+            } finally {
+                source.close()
+                target.close()
+            }
+        }
+
+        val afterSecondRun = CopySessionRepository.getSession(sessionId)!!
+        // CHECK по-прежнему падает на том же REGEXP (это ожидаемо и не чинится этим тестом) —
+        // важно, что причина падения не изменилась на дубликат ключа.
+        assertEquals("failed", afterSecondRun.status)
+        assertFalse(
+            afterSecondRun.lastError?.contains("Duplicate", ignoreCase = true) == true,
+            "lastError should not be a duplicate-key error: ${afterSecondRun.lastError}"
+        )
+
+        DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { conn ->
+            conn.createStatement().use { stmt ->
+                stmt.executeQuery("SELECT COUNT(*) FROM flaky").use { rs ->
+                    rs.next()
+                    assertEquals(rowCount, rs.getInt(1), "row count must stay the same, not be re-inserted")
                 }
             }
         }

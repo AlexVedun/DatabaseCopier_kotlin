@@ -201,6 +201,8 @@ class ProgressPanelController(
         sessionId?.let { CopySessionRepository.updateSessionStatus(it, "cancelled") }
         pauseButton.isDisable = true
         cancelButton.isDisable = true
+        overallLabel.text = "Сессия отменена"
+        errorLabel.text = ""
     }
 
     private fun onProgress(event: CopyProgressEvent, totalTables: Int) {
@@ -217,8 +219,10 @@ class ProgressPanelController(
     private fun onFinished(sessionId: Int) {
         startButton.isDisable = false
         pauseButton.isDisable = true
-        cancelButton.isDisable = true
         val session = CopySessionRepository.getSession(sessionId)
+        // "Отменить" остаётся доступна после failed/paused — иначе с упавшей сессией нельзя было
+        // сделать вообще ничего, кроме бесконечных попыток "Запустить" заново.
+        cancelButton.isDisable = session?.status !in setOf("failed", "paused")
         overallLabel.text = "Сессия завершена со статусом: ${session?.status}"
         if (session?.status == "completed") {
             overallProgressBar.progress = 1.0

@@ -27,7 +27,9 @@ class DatabaseCopierApp : Application() {
             scene.root = CopyView().root
         } else {
             scene.root = SessionsView(
-                onContinue = { id -> scene.root = CopyView(existingSessionId = id).root },
+                onContinue = { id ->
+                    scene.root = CopyView(existingSessionId = id, onBackToSessions = { showInitialScreen(scene) }).root
+                },
                 onSkip = { scene.root = CopyView().root },
             ).root
         }

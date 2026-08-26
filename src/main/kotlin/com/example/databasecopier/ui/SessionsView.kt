@@ -39,15 +39,28 @@ class SessionsView(
             prefWidth = 150.0
         }
         val actionColumn = TableColumn<CopySessionRecord, Void>("").apply {
-            prefWidth = 140.0
+            prefWidth = 220.0
             cellFactory = Callback {
                 object : TableCell<CopySessionRecord, Void>() {
-                    private val button = Button("Продолжить").apply {
+                    private val continueButton = Button("Продолжить").apply {
                         setOnAction { onContinue(tableView.items[index].id) }
                     }
+                    // "Закрыть" — чтобы неудачные/отменённые сессии не висели в списке
+                    // "продолжаемых" вечно (listResumable() включает и status = "failed").
+                    private val closeButton = Button("Закрыть").apply {
+                        setOnAction {
+                            CopySessionRepository.updateSessionStatus(tableView.items[index].id, "cancelled")
+                            // Явно квалифицируем this@SessionsView — иначе unqualified refresh()
+                            // резолвится в ближайший TableView.refresh() (просто перерисовка ячеек
+                            // без повторного запроса данных), а не в перезагрузку списка ниже.
+                            this@SessionsView.refresh()
+                        }
+                    }
+                    private val box = javafx.scene.layout.HBox(8.0, continueButton, closeButton)
+
                     override fun updateItem(item: Void?, empty: Boolean) {
                         super.updateItem(item, empty)
-                        graphic = if (empty) null else button
+                        graphic = if (empty) null else box
                     }
                 }
             }
