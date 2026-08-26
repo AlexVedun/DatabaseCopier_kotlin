@@ -351,6 +351,65 @@ abstract class JdbcAdapterTestBase {
     }
 
     @Test
+    fun `renames a colliding CHECK constraint instead of failing when two different tables share a name`() {
+        // SQLite не поддерживает ALTER TABLE ADD CONSTRAINT CHECK — createIndexesAndConstraints()
+        // там осознанно пропускает CHECK, проверять здесь нечего.
+        assumeTrue(config().type != DbType.SQLITE)
+
+        // Реальный сценарий: ORM (например Doctrine) генерирует одинаковое имя CHECK для двух
+        // разных сущностей, использующих общий трейт — обе таблицы должны скопироваться, вторая
+        // с детерминированно переименованным ограничением, а не упасть с ошибкой.
+        target.createTable(
+            TableStructure(
+                "chk_clash_a",
+                listOf(ColumnDef("id", LogicalType.INTEGER, false), ColumnDef("amount", LogicalType.INTEGER, true)),
+                listOf("id"),
+                checkConstraints = listOf(CheckConstraintDef("shared_chk_name", "amount > 0")),
+            )
+        )
+        target.createIndexesAndConstraints(
+            TableStructure(
+                "chk_clash_a",
+                emptyList(),
+                emptyList(),
+                checkConstraints = listOf(CheckConstraintDef("shared_chk_name", "amount > 0")),
+            )
+        )
+
+        target.createTable(
+            TableStructure(
+                "chk_clash_b",
+                listOf(ColumnDef("id", LogicalType.INTEGER, false), ColumnDef("amount", LogicalType.INTEGER, true)),
+                listOf("id"),
+            )
+        )
+        // Не должно бросить исключение — конфликтующее имя должно быть переименовано автоматически.
+        target.createIndexesAndConstraints(
+            TableStructure(
+                "chk_clash_b",
+                emptyList(),
+                emptyList(),
+                checkConstraints = listOf(CheckConstraintDef("shared_chk_name", "amount > 0")),
+            )
+        )
+
+        // Ограничение на chk_clash_b реально создано (просто под другим именем) — доказываем это
+        // прямой попыткой вставить невалидное значение.
+        val invalidInsertFails = try {
+            rawConnection.createStatement().use { stmt -> stmt.execute("INSERT INTO chk_clash_b (id, amount) VALUES (1, -5)") }
+            false
+        } catch (e: Exception) {
+            true
+        }
+        assertTrue(invalidInsertFails, "переименованное CHECK-ограничение должно реально работать на chk_clash_b")
+
+        rawConnection.createStatement().use { stmt ->
+            stmt.execute("DROP TABLE chk_clash_a")
+            stmt.execute("DROP TABLE chk_clash_b")
+        }
+    }
+
+    @Test
     fun `reads table and column comments, then recreates them on target`() {
         // SQLite не поддерживает комментарии таблиц/колонок — ни на чтение, ни на запись.
         assumeTrue(config().type != DbType.SQLITE)

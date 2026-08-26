@@ -188,19 +188,49 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
             // только в момент CREATE TABLE, которое createTable() (пока) не делает; пропускаем.
             if (config.type != DbType.SQLITE) {
                 for (chk in structure.checkConstraints) {
-                    val name = safeIdentifier(chk.name)
-                    executeCreateOrDetectCollision(
-                        stmt,
-                        "ALTER TABLE ${quote(structure.name)} ADD CONSTRAINT ${quote(name)} CHECK (${chk.expression})",
-                        objectLabel = "CHECK-ограничение",
-                        objectName = name,
-                        ownerTable = structure.name,
-                        lookupOwner = ::existingCheckConstraintOwner,
-                    )
+                    createCheckConstraint(stmt, structure.name, chk)
                 }
             }
         }
         connection.commit()
+    }
+
+    // В отличие от индексов (см. выше — там коллизия имени между разными таблицами считается
+    // ошибкой данных источника и явно поднимается), для CHECK-ограничений по решению пользователя
+    // при таком конфликте имя детерминированно переименовывается (добавлением имени таблицы), а не
+    // ронять сессию — это частый паттерн для ORM (например Doctrine), где имя CHECK генерируется
+    // из общего трейта/интерфейса нескольких сущностей и потому случайно совпадает между таблицами.
+    private fun createCheckConstraint(stmt: Statement, table: String, chk: CheckConstraintDef) {
+        var name = safeIdentifier(chk.name)
+        var attempt = 0
+        while (true) {
+            val savepoint = if (config.type == DbType.POSTGRESQL) connection.setSavepoint() else null
+            try {
+                stmt.execute("ALTER TABLE ${quote(table)} ADD CONSTRAINT ${quote(name)} CHECK (${chk.expression})")
+                if (savepoint != null) connection.releaseSavepoint(savepoint)
+                return
+            } catch (e: SQLException) {
+                if (savepoint != null) connection.rollback(savepoint)
+                if (!looksLikeDuplicate(e)) throw e
+
+                val existingOwner = existingCheckConstraintOwner(name)
+                if (existingOwner != null && existingOwner.equals(table, ignoreCase = true)) {
+                    return // тот же constraint той же таблицы — безопасный повторный запуск, не ошибка
+                }
+
+                attempt++
+                if (attempt > 5) {
+                    throw IllegalStateException(
+                        "Не удалось создать CHECK-ограничение '${chk.name}' на таблице '$table' — имя " +
+                            "конфликтует с объектами других таблиц даже после переименования " +
+                            "(последняя попытка: '$name').",
+                        e,
+                    )
+                }
+                // Детерминированное переименование: имя_таблица, при повторной коллизии — со счётчиком.
+                name = safeIdentifier(if (attempt == 1) "${chk.name}_$table" else "${chk.name}_${table}_$attempt")
+            }
+        }
     }
 
     private fun existingIndexOwner(name: String): String? {
