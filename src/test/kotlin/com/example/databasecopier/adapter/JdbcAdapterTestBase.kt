@@ -242,6 +242,61 @@ abstract class JdbcAdapterTestBase {
     }
 
     @Test
+    fun `reads table and column comments, then recreates them on target`() {
+        // SQLite не поддерживает комментарии таблиц/колонок — ни на чтение, ни на запись.
+        assumeTrue(config().type != DbType.SQLITE)
+
+        when (config().type) {
+            DbType.MYSQL -> rawConnection.createStatement().use { stmt ->
+                stmt.execute(
+                    "CREATE TABLE cmt_src (id INTEGER PRIMARY KEY, note VARCHAR(50) COMMENT 'col comment') " +
+                        "COMMENT='table comment'"
+                )
+            }
+            DbType.POSTGRESQL -> rawConnection.createStatement().use { stmt ->
+                stmt.execute("CREATE TABLE cmt_src (id INTEGER PRIMARY KEY, note VARCHAR(50))")
+                stmt.execute("COMMENT ON TABLE cmt_src IS 'table comment'")
+                stmt.execute("COMMENT ON COLUMN cmt_src.note IS 'col comment'")
+            }
+            DbType.SQLSERVER -> rawConnection.createStatement().use { stmt ->
+                stmt.execute("CREATE TABLE cmt_src (id INTEGER PRIMARY KEY, note NVARCHAR(50))")
+                stmt.execute(
+                    "EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'table comment', " +
+                        "@level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N'cmt_src'"
+                )
+                stmt.execute(
+                    "EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N'col comment', " +
+                        "@level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N'cmt_src', " +
+                        "@level2type=N'COLUMN', @level2name=N'note'"
+                )
+            }
+            DbType.SQLITE -> Unit
+        }
+
+        val structure = source.getTableStructure("cmt_src")
+        assertEquals("table comment", structure.comment)
+        assertEquals("col comment", structure.columns.first { it.name == "note" }.comment)
+
+        target.createTable(structure.copy(name = "cmt_target"))
+
+        // Читаем обратно через тот же JdbcSourceAdapter (другой инстанс), чтобы убедиться, что
+        // комментарий реально записан в каталог target, а не просто не упал молча.
+        val readBack = JdbcSourceAdapter(config()).apply { connect() }
+        try {
+            val targetStructure = readBack.getTableStructure("cmt_target")
+            assertEquals("table comment", targetStructure.comment)
+            assertEquals("col comment", targetStructure.columns.first { it.name == "note" }.comment)
+        } finally {
+            readBack.close()
+        }
+
+        rawConnection.createStatement().use { stmt ->
+            stmt.execute("DROP TABLE cmt_target")
+            stmt.execute("DROP TABLE cmt_src")
+        }
+    }
+
+    @Test
     fun `creates foreign key constraint with referential action after both tables exist`() {
         // SQLite не поддерживает ALTER TABLE ADD CONSTRAINT FOREIGN KEY — createForeignKeys()
         // там осознанно no-op (см. JdbcTargetAdapter), проверять здесь нечего.

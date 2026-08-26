@@ -23,6 +23,10 @@ data class ColumnDef(
     // Сырое SQL-выражение дефолта как есть в источнике; для autoIncrement-колонок всегда null —
     // такие колонки получают на target нативный механизм автоинкремента, а не скопированный DEFAULT.
     val defaultValue: String? = null,
+    // Значимо только при копировании между одинаковыми СУБД — имя collation одного диалекта, как
+    // правило, не является валидным именем в другом (см. JdbcTargetAdapter.buildColumnSql).
+    val collation: String? = null,
+    val comment: String? = null,
 )
 
 data class IndexDef(val name: String, val columns: List<String>, val unique: Boolean)
@@ -37,6 +41,7 @@ data class TableStructure(
     // KEY, а не часть PRIMARY KEY).
     val indexes: List<IndexDef> = emptyList(),
     val checkConstraints: List<CheckConstraintDef> = emptyList(),
+    val comment: String? = null,
 )
 
 enum class ReferentialAction { CASCADE, SET_NULL, RESTRICT, NO_ACTION, SET_DEFAULT }

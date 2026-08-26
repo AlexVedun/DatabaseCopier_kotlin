@@ -38,12 +38,13 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
         if (config.type == DbType.SQLITE) return getSqliteTableStructure(table)
 
         val identityColumns = if (config.type == DbType.SQLSERVER) readMssqlIdentityColumns(table) else emptySet()
+        val columnComments = getColumnComments(table)
         val columns = mutableListOf<ColumnDef>()
         val columnsSql = if (config.type == DbType.MYSQL) {
-            "SELECT column_name, data_type, is_nullable, extra, column_default FROM information_schema.columns " +
+            "SELECT column_name, data_type, is_nullable, extra, column_default, collation_name FROM information_schema.columns " +
                 "WHERE table_name = ? AND ${schemaClause()} ORDER BY ordinal_position"
         } else {
-            "SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns " +
+            "SELECT column_name, data_type, is_nullable, column_default, collation_name FROM information_schema.columns " +
                 "WHERE table_name = ? AND ${schemaClause()} ORDER BY ordinal_position"
         }
         connection.prepareStatement(columnsSql).use { ps ->
@@ -67,6 +68,8 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
                             // nextval(...)/identity уже подразумевают генерацию значения — обычный
                             // DEFAULT для таких колонок не нужен и не переносится.
                             defaultValue = if (autoIncrement) null else rawDefault,
+                            collation = rs.getString("collation_name"),
+                            comment = columnComments[name],
                         )
                     )
                 }
@@ -90,7 +93,52 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
             }
         }
 
-        return TableStructure(table, columns, primaryKey, getIndexes(table), getCheckConstraints(table))
+        return TableStructure(table, columns, primaryKey, getIndexes(table), getCheckConstraints(table), getTableComment(table))
+    }
+
+    private fun getColumnComments(table: String): Map<String, String> {
+        val sql = when (config.type) {
+            DbType.MYSQL ->
+                "SELECT column_name, column_comment FROM information_schema.columns " +
+                    "WHERE table_name = ? AND column_comment != '' AND ${schemaClause()}"
+            DbType.POSTGRESQL ->
+                "SELECT a.attname AS column_name, d.description AS column_comment " +
+                    "FROM pg_description d JOIN pg_class c ON d.objoid = c.oid " +
+                    "JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = d.objsubid " +
+                    "WHERE c.relname = ? AND d.objsubid > 0"
+            DbType.SQLSERVER ->
+                "SELECT c.name AS column_name, CAST(ep.value AS NVARCHAR(MAX)) AS column_comment " +
+                    "FROM sys.extended_properties ep " +
+                    "JOIN sys.tables t ON ep.major_id = t.object_id " +
+                    "JOIN sys.columns c ON ep.major_id = c.object_id AND ep.minor_id = c.column_id " +
+                    "WHERE t.name = ? AND ep.name = 'MS_Description' AND ep.minor_id > 0"
+            else -> return emptyMap()
+        }
+        val result = mutableMapOf<String, String>()
+        connection.prepareStatement(sql).use { ps ->
+            ps.setString(1, table)
+            ps.executeQuery().use { rs -> while (rs.next()) result[rs.getString("column_name")] = rs.getString("column_comment") }
+        }
+        return result
+    }
+
+    private fun getTableComment(table: String): String? {
+        val sql = when (config.type) {
+            DbType.MYSQL ->
+                "SELECT table_comment FROM information_schema.tables WHERE table_name = ? AND table_comment != '' AND ${schemaClause()}"
+            DbType.POSTGRESQL ->
+                "SELECT d.description FROM pg_description d JOIN pg_class c ON d.objoid = c.oid " +
+                    "WHERE c.relname = ? AND d.objsubid = 0"
+            DbType.SQLSERVER ->
+                "SELECT CAST(ep.value AS NVARCHAR(MAX)) AS description FROM sys.extended_properties ep " +
+                    "JOIN sys.tables t ON ep.major_id = t.object_id " +
+                    "WHERE t.name = ? AND ep.name = 'MS_Description' AND ep.minor_id = 0"
+            else -> return null
+        }
+        connection.prepareStatement(sql).use { ps ->
+            ps.setString(1, table)
+            ps.executeQuery().use { rs -> return if (rs.next()) rs.getString(1) else null }
+        }
     }
 
     private fun getIndexes(table: String): List<IndexDef> {

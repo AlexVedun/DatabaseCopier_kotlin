@@ -27,16 +27,57 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
             ", PRIMARY KEY (${structure.primaryKey.joinToString(", ") { quote(it) }})"
         } else ""
 
+        // MySQL позволяет задать комментарий таблицы прямо в CREATE TABLE — остальным СУБД
+        // (кроме SQLite, где комментарии не поддерживаются) это делается отдельным statement'ом
+        // после создания таблицы, см. applyTableAndColumnComments().
+        val tableCommentSql = if (config.type == DbType.MYSQL) {
+            structure.comment?.let { " COMMENT=${stringLiteral(it)}" } ?: ""
+        } else ""
+
         connection.createStatement().use { stmt ->
             // Если таблица с таким именем уже существует на target — она безусловно удаляется
             // и создаётся заново по структуре источника (решение зафиксировано с пользователем:
             // не пытаться угадывать совместимость существующей схемы, а гарантировать, что
             // структура target всегда точно соответствует source).
             stmt.execute("DROP TABLE IF EXISTS ${quote(structure.name)}")
-            stmt.execute("CREATE TABLE ${quote(structure.name)} ($columnsSql$pkSql)")
+            stmt.execute("CREATE TABLE ${quote(structure.name)} ($columnsSql$pkSql)$tableCommentSql")
+        }
+        connection.commit()
+
+        if (config.type == DbType.POSTGRESQL || config.type == DbType.SQLSERVER) {
+            applyTableAndColumnComments(structure)
+        }
+    }
+
+    private fun applyTableAndColumnComments(structure: TableStructure) {
+        connection.createStatement().use { stmt ->
+            structure.comment?.let { comment ->
+                val sql = when (config.type) {
+                    DbType.POSTGRESQL -> "COMMENT ON TABLE ${quote(structure.name)} IS ${stringLiteral(comment)}"
+                    DbType.SQLSERVER -> "EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N${stringLiteral(comment)}, " +
+                        "@level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N'${structure.name.replace("'", "''")}'"
+                    else -> return@let
+                }
+                stmt.execute(sql)
+            }
+            for (col in structure.columns) {
+                val comment = col.comment ?: continue
+                val sql = when (config.type) {
+                    DbType.POSTGRESQL ->
+                        "COMMENT ON COLUMN ${quote(structure.name)}.${quote(col.name)} IS ${stringLiteral(comment)}"
+                    DbType.SQLSERVER ->
+                        "EXEC sys.sp_addextendedproperty @name=N'MS_Description', @value=N${stringLiteral(comment)}, " +
+                            "@level0type=N'SCHEMA', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N'${structure.name.replace("'", "''")}', " +
+                            "@level2type=N'COLUMN', @level2name=N'${col.name.replace("'", "''")}'"
+                    else -> continue
+                }
+                stmt.execute(sql)
+            }
         }
         connection.commit()
     }
+
+    private fun stringLiteral(value: String): String = "'${value.replace("'", "''")}'"
 
     private fun buildColumnSql(col: ColumnDef, isSqliteAutoIncPk: Boolean): String {
         if (isSqliteAutoIncPk) return "${quote(col.name)} INTEGER PRIMARY KEY AUTOINCREMENT"
@@ -56,7 +97,23 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
         } else ""
         val nullability = if (col.nullable) "" else " NOT NULL"
         val defaultSql = safeDefaultSql(col.defaultValue)?.let { " DEFAULT $it" } ?: ""
-        return "${quote(col.name)} $sqlType$autoIncrementSql$nullability$defaultSql"
+        val collationSql = safeCollationSql(col.collation)
+        // MySQL — единственная СУБД здесь, где комментарий колонки можно (и нужно) задать прямо
+        // в CREATE TABLE; для Postgres/MSSQL это отдельный statement после создания таблицы,
+        // см. applyTableAndColumnComments().
+        val commentSql = if (config.type == DbType.MYSQL) col.comment?.let { " COMMENT ${stringLiteral(it)}" } ?: "" else ""
+        return "${quote(col.name)} $sqlType$collationSql$autoIncrementSql$nullability$defaultSql$commentSql"
+    }
+
+    // Имя collation одного диалекта почти никогда не валидно в другом (например Postgres
+    // "en_US.utf8" против MySQL "utf8mb4_unicode_ci"), поэтому переносим только для MySQL/MSSQL,
+    // где формат имени — простой идентификатор, и только если он проходит базовую санацию.
+    // Postgres/SQLite как target — молча пропускаем.
+    private fun safeCollationSql(raw: String?): String {
+        if (raw == null) return ""
+        if (config.type != DbType.MYSQL && config.type != DbType.SQLSERVER) return ""
+        if (!Regex("""^[A-Za-z0-9_]+$""").matches(raw)) return ""
+        return " COLLATE $raw"
     }
 
     // Переносим только простые литералы дефолта (число/строка/NULL/CURRENT_TIMESTAMP) — сложные
