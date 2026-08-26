@@ -15,7 +15,15 @@ data class ConnectionConfig(
 
 enum class LogicalType { INTEGER, BIGINT, VARCHAR, TEXT, DECIMAL, BOOLEAN, DATE, DATETIME, JSON, UUID }
 
-data class ColumnDef(val name: String, val type: LogicalType, val nullable: Boolean)
+data class ColumnDef(
+    val name: String,
+    val type: LogicalType,
+    val nullable: Boolean,
+    val autoIncrement: Boolean = false,
+    // Сырое SQL-выражение дефолта как есть в источнике; для autoIncrement-колонок всегда null —
+    // такие колонки получают на target нативный механизм автоинкремента, а не скопированный DEFAULT.
+    val defaultValue: String? = null,
+)
 
 data class TableStructure(val name: String, val columns: List<ColumnDef>, val primaryKey: List<String>)
 

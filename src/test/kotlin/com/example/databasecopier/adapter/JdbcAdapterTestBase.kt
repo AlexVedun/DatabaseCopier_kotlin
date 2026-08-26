@@ -217,6 +217,55 @@ abstract class JdbcAdapterTestBase {
     }
 
     @Test
+    fun `reads auto-increment and default value, then recreates natively on target with synced counter`() {
+        val ddl = when (config().type) {
+            DbType.MYSQL -> "CREATE TABLE auto_src (id INTEGER PRIMARY KEY AUTO_INCREMENT, note VARCHAR(50) DEFAULT 'hi')"
+            DbType.POSTGRESQL -> "CREATE TABLE auto_src (id SERIAL PRIMARY KEY, note VARCHAR(50) DEFAULT 'hi')"
+            DbType.SQLITE -> "CREATE TABLE auto_src (id INTEGER PRIMARY KEY AUTOINCREMENT, note TEXT DEFAULT 'hi')"
+            DbType.SQLSERVER -> "CREATE TABLE auto_src (id INT IDENTITY(1,1) PRIMARY KEY, note NVARCHAR(50) DEFAULT 'hi')"
+        }
+        rawConnection.createStatement().use { stmt ->
+            stmt.execute(ddl)
+            stmt.execute("INSERT INTO auto_src (note) VALUES ('a')")
+            stmt.execute("INSERT INTO auto_src (note) VALUES ('b')")
+            stmt.execute("INSERT INTO auto_src (note) VALUES ('c')")
+        }
+
+        val structure = source.getTableStructure("auto_src")
+        val idCol = structure.columns.first { it.name == "id" }
+        val noteCol = structure.columns.first { it.name == "note" }
+        assertTrue(idCol.autoIncrement)
+        assertEquals(null, idCol.defaultValue)
+        assertFalse(noteCol.autoIncrement)
+        assertTrue(noteCol.defaultValue?.contains("hi") == true)
+
+        // Пересоздаём структуру на target (та же СУБД, чтобы не смешивать с кросс-диалектным
+        // маппингом типов — это отдельно проверяется тестами TypeMapper) и вручную "копируем"
+        // существующие строки, как это делает CopyRunner.
+        target.createTable(structure.copy(name = "auto_target"))
+        target.insertBatch(
+            "auto_target",
+            listOf(mapOf("id" to 1, "note" to "x"), mapOf("id" to 2, "note" to "y"), mapOf("id" to 3, "note" to "z")),
+        )
+        target.syncAutoIncrement("auto_target", "id", 3)
+
+        // Новая строка без явного id должна продолжить нумерацию с 4, а не конфликтовать с уже
+        // скопированными — это и доказывает, что счётчик автоинкремента реально синхронизирован.
+        rawConnection.createStatement().use { stmt -> stmt.execute("INSERT INTO auto_target (note) VALUES ('new')") }
+        rawConnection.createStatement().use { stmt ->
+            stmt.executeQuery("SELECT id FROM auto_target WHERE note = 'new'").use { rs ->
+                rs.next()
+                assertEquals(4, rs.getInt("id"))
+            }
+        }
+
+        rawConnection.createStatement().use { stmt ->
+            stmt.execute("DROP TABLE auto_target")
+            stmt.execute("DROP TABLE auto_src")
+        }
+    }
+
+    @Test
     fun `allows inserting a row with a dangling foreign key while checks are disabled`() {
         // FOREIGN_KEY_CHECKS/session_replication_role — настройки уровня сессии, поэтому и
         // отключение, и сама вставка обязаны идти через одно и то же JDBC-соединение (target).

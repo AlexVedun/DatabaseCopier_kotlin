@@ -24,6 +24,10 @@ object CreateTableParser {
         else -> ReferentialAction.NO_ACTION
     }
     private val SKIP_PREFIXES = listOf("KEY", "UNIQUE", "INDEX", "CONSTRAINT", "CHECK")
+    private val DEFAULT_REGEX = Regex(
+        """(?i)DEFAULT\s+('(?:[^'\\]|\\.)*'|-?\d+(?:\.\d+)?|CURRENT_TIMESTAMP\w*|NULL)"""
+    )
+    private val SERIAL_TYPES = setOf("serial", "bigserial", "smallserial")
 
     data class Result(val structure: TableStructure, val foreignKeys: List<ForeignKeyRef>)
 
@@ -72,7 +76,12 @@ object CreateTableParser {
                     val sqlType = colMatch.groupValues[2]
                     val nullable = !upper.contains("NOT NULL")
                     if (upper.contains("PRIMARY KEY")) primaryKey.add(colName)
-                    columns.add(ColumnDef(colName, TypeMapper.fromSqlType(dbType, sqlType), nullable))
+                    val autoIncrement = upper.contains("AUTO_INCREMENT") || upper.contains("AUTOINCREMENT") ||
+                        sqlType.lowercase() in SERIAL_TYPES
+                    val defaultValue = if (autoIncrement) null else DEFAULT_REGEX.find(entry)?.groupValues?.get(1)
+                    columns.add(
+                        ColumnDef(colName, TypeMapper.fromSqlType(dbType, sqlType), nullable, autoIncrement, defaultValue)
+                    )
                 }
             }
         }

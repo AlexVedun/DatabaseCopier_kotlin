@@ -19,8 +19,8 @@ object TypeMapper {
             }
             DbType.POSTGRESQL -> when {
                 t == "boolean" -> LogicalType.BOOLEAN
-                t == "integer" || t == "smallint" -> LogicalType.INTEGER
-                t == "bigint" -> LogicalType.BIGINT
+                t == "integer" || t == "smallint" || t == "serial" || t == "smallserial" -> LogicalType.INTEGER
+                t == "bigint" || t == "bigserial" -> LogicalType.BIGINT
                 t.startsWith("character varying") || t.startsWith("varchar") || t.startsWith("character") -> LogicalType.VARCHAR
                 t == "text" -> LogicalType.TEXT
                 t.startsWith("numeric") || t.startsWith("decimal") || t.startsWith("double") || t.startsWith("real") -> LogicalType.DECIMAL

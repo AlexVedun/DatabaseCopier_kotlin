@@ -37,18 +37,36 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
     override fun getTableStructure(table: String): TableStructure {
         if (config.type == DbType.SQLITE) return getSqliteTableStructure(table)
 
+        val identityColumns = if (config.type == DbType.SQLSERVER) readMssqlIdentityColumns(table) else emptySet()
         val columns = mutableListOf<ColumnDef>()
-        val columnsSql = "SELECT column_name, data_type, is_nullable FROM information_schema.columns " +
-            "WHERE table_name = ? AND ${schemaClause()} ORDER BY ordinal_position"
+        val columnsSql = if (config.type == DbType.MYSQL) {
+            "SELECT column_name, data_type, is_nullable, extra, column_default FROM information_schema.columns " +
+                "WHERE table_name = ? AND ${schemaClause()} ORDER BY ordinal_position"
+        } else {
+            "SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns " +
+                "WHERE table_name = ? AND ${schemaClause()} ORDER BY ordinal_position"
+        }
         connection.prepareStatement(columnsSql).use { ps ->
             ps.setString(1, table)
             ps.executeQuery().use { rs ->
                 while (rs.next()) {
+                    val name = rs.getString("column_name")
+                    val rawDefault = rs.getString("column_default")
+                    val autoIncrement = when (config.type) {
+                        DbType.MYSQL -> rs.getString("extra")?.contains("auto_increment", ignoreCase = true) == true
+                        DbType.POSTGRESQL -> rawDefault?.startsWith("nextval(") == true
+                        DbType.SQLSERVER -> name in identityColumns
+                        else -> false
+                    }
                     columns.add(
                         ColumnDef(
-                            name = rs.getString("column_name"),
+                            name = name,
                             type = TypeMapper.fromSqlType(config.type, rs.getString("data_type")),
                             nullable = rs.getString("is_nullable") == "YES",
+                            autoIncrement = autoIncrement,
+                            // nextval(...)/identity уже подразумевают генерацию значения — обычный
+                            // DEFAULT для таких колонок не нужен и не переносится.
+                            defaultValue = if (autoIncrement) null else rawDefault,
                         )
                     )
                 }
@@ -77,26 +95,48 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
 
     /** SQLite не поддерживает `information_schema` — структура читается через `PRAGMA table_info`. */
     private fun getSqliteTableStructure(table: String): TableStructure {
-        val columns = mutableListOf<ColumnDef>()
-        val pkPositions = mutableListOf<Pair<Int, String>>()
+        data class Raw(val name: String, val type: String, val notNull: Boolean, val default: String?, val pk: Int)
+        val raws = mutableListOf<Raw>()
         connection.createStatement().use { stmt ->
             stmt.executeQuery("PRAGMA table_info(${quote(table)})").use { rs ->
                 while (rs.next()) {
-                    val name = rs.getString("name")
-                    columns.add(
-                        ColumnDef(
-                            name = name,
-                            type = TypeMapper.fromSqlType(DbType.SQLITE, rs.getString("type") ?: ""),
-                            nullable = rs.getInt("notnull") == 0,
+                    raws.add(
+                        Raw(
+                            name = rs.getString("name"),
+                            type = rs.getString("type") ?: "",
+                            notNull = rs.getInt("notnull") != 0,
+                            default = rs.getString("dflt_value"),
+                            pk = rs.getInt("pk"),
                         )
                     )
-                    val pk = rs.getInt("pk")
-                    if (pk > 0) pkPositions.add(pk to name)
                 }
             }
         }
-        val primaryKey = pkPositions.sortedBy { it.first }.map { it.second }
+        // В SQLite единственная INTEGER-колонка PK — это alias rowid, который автоинкрементится
+        // сам по себе (без явного ключевого слова AUTOINCREMENT в исходном CREATE TABLE).
+        val singlePk = raws.filter { it.pk > 0 }.singleOrNull()
+        val columns = raws.map { r ->
+            val autoIncrement = singlePk?.name == r.name && r.type.contains("int", ignoreCase = true)
+            ColumnDef(
+                name = r.name,
+                type = TypeMapper.fromSqlType(DbType.SQLITE, r.type),
+                nullable = !r.notNull,
+                autoIncrement = autoIncrement,
+                defaultValue = if (autoIncrement) null else r.default,
+            )
+        }
+        val primaryKey = raws.filter { it.pk > 0 }.sortedBy { it.pk }.map { it.name }
         return TableStructure(table, columns, primaryKey)
+    }
+
+    private fun readMssqlIdentityColumns(table: String): Set<String> {
+        val result = mutableSetOf<String>()
+        val sql = "SELECT c.name FROM sys.identity_columns c JOIN sys.tables t ON c.object_id = t.object_id WHERE t.name = ?"
+        connection.prepareStatement(sql).use { ps ->
+            ps.setString(1, table)
+            ps.executeQuery().use { rs -> while (rs.next()) result.add(rs.getString("name")) }
+        }
+        return result
     }
 
     override fun getForeignKeys(table: String): List<ForeignKeyRef> {

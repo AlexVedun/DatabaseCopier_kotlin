@@ -51,7 +51,8 @@ class CopyRunner {
                 }
 
                 if (needsData) {
-                    current = copyTableData(sessionId, current, source, target, session.batchSize)
+                    val autoIncrementColumn = structure.columns.firstOrNull { it.autoIncrement }?.name
+                    current = copyTableData(sessionId, current, source, target, session.batchSize, autoIncrementColumn)
                         ?: return@withContext // паузa/отмена внутри копирования данных таблицы
                 }
 
@@ -85,6 +86,7 @@ class CopyRunner {
         source: SourceAdapter,
         target: TargetAdapter,
         batchSize: Int,
+        autoIncrementColumn: String?,
     ): CopySessionTableRecord? {
         var current = initial
         CopySessionRepository.updateTableStatus(current.id, "in_progress")
@@ -92,6 +94,7 @@ class CopyRunner {
         emit(sessionId, current)
 
         var cursor: JsonElement? = current.cursorJson?.let { Json.parseToJsonElement(it) }
+        var maxAutoIncrementValue: Long? = null
 
         while (true) {
             if (!isRunnable(sessionId)) return null
@@ -99,6 +102,12 @@ class CopyRunner {
             val batch = source.readBatch(current.tableName, cursor, batchSize)
             if (batch.rows.isNotEmpty()) {
                 target.insertBatch(current.tableName, batch.rows)
+                if (autoIncrementColumn != null) {
+                    for (row in batch.rows) {
+                        val value = (row[autoIncrementColumn] as? Number)?.toLong() ?: continue
+                        if (maxAutoIncrementValue == null || value > maxAutoIncrementValue!!) maxAutoIncrementValue = value
+                    }
+                }
             }
 
             val rowsCopied = current.rowsCopied + batch.rows.size
@@ -109,6 +118,13 @@ class CopyRunner {
 
             cursor = batch.nextCursor
             if (cursor == null) break
+        }
+
+        // Синхронизация счётчика — только после того, как ВСЕ строки таблицы скопированы (не на
+        // каждом батче), иначе новые строки, вставленные в target вручную между батчами, рискуют
+        // получить PK, конфликтующий с ещё не скопированными строками источника.
+        if (autoIncrementColumn != null && maxAutoIncrementValue != null) {
+            target.syncAutoIncrement(current.tableName, autoIncrementColumn, maxAutoIncrementValue!!)
         }
 
         return current
