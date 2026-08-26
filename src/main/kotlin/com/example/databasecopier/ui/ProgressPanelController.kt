@@ -38,6 +38,7 @@ class ProgressPanelController(
     private val overallProgressBar = ProgressBar(0.0).apply { prefWidth = 300.0 }
     private val tableLabel = Label("")
     private val tableProgressBar = ProgressBar(0.0).apply { prefWidth = 300.0 }
+    private val errorLabel = Label("").apply { isWrapText = true; style = "-fx-text-fill: red;" }
 
     var sessionId: Int? = null
         private set
@@ -50,12 +51,20 @@ class ProgressPanelController(
         overallProgressBar,
         tableLabel,
         tableProgressBar,
+        errorLabel,
     ).apply { padding = Insets(8.0) }
 
     private var collectorJob: Job? = null
 
+    // По умолчанию кнопка "Запустить" создаёт новую сессию из настроенных source/target панелей.
+    // Но в режиме продолжения сессии (CopyView(existingSessionId)) эти панели не отображаются и не
+    // настроены — там повторное нажатие "Запустить" (например, после failed) обязано повторить
+    // именно resumeSession(id), а не start(), иначе пользователь неизбежно получает "источник не
+    // настроен", даже когда сессия и её источник/приёмник давно сохранены в служебной БД.
+    private var onStartRequested: () -> Unit = { start() }
+
     init {
-        startButton.setOnAction { start() }
+        startButton.setOnAction { onStartRequested() }
         pauseButton.setOnAction { pause() }
         cancelButton.setOnAction { cancel() }
     }
@@ -105,6 +114,8 @@ class ProgressPanelController(
      * никакого нового ввода от пользователя не требуется.
      */
     fun resumeSession(id: Int) {
+        onStartRequested = { resumeSession(id) }
+
         val session = CopySessionRepository.getSession(id)
         if (session == null) {
             showError("Сессия не найдена")
@@ -158,6 +169,7 @@ class ProgressPanelController(
         overallLabel.text = "Копирование: 0 из $totalTables таблиц"
         overallProgressBar.progress = 0.0
         tableProgressBar.progress = 0.0
+        errorLabel.text = ""
 
         val runner = CopyRunner()
         collectorJob = AppScope.scope.launch {
@@ -206,12 +218,13 @@ class ProgressPanelController(
         startButton.isDisable = false
         pauseButton.isDisable = true
         cancelButton.isDisable = true
-        val status = CopySessionRepository.getSession(sessionId)?.status
-        overallLabel.text = "Сессия завершена со статусом: $status"
-        if (status == "completed") {
+        val session = CopySessionRepository.getSession(sessionId)
+        overallLabel.text = "Сессия завершена со статусом: ${session?.status}"
+        if (session?.status == "completed") {
             overallProgressBar.progress = 1.0
             tableProgressBar.progress = 1.0
         }
+        errorLabel.text = if (session?.status == "failed") "Ошибка: ${session.lastError}" else ""
     }
 
     private fun showError(message: String) {

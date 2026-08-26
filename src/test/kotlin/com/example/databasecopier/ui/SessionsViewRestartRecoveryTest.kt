@@ -200,6 +200,61 @@ class SessionsViewRestartRecoveryTest {
         }
     }
 
+    @Test
+    fun `clicking start again after a resumed session finishes retries the same session, not the new-session flow`() {
+        val sourceConnId = ConnectionRepository.save("mysql-source-2", sourceConfig)
+        val targetConnId = ConnectionRepository.save("postgres-target-2", targetConfig)
+
+        val sessionId = CopySessionRepository.createSession(
+            name = "retry session",
+            sourceType = "connection",
+            sourceConnectionId = sourceConnId,
+            sourceDumpPath = null,
+            sourceDumpDialect = null,
+            targetConnectionId = targetConnId,
+            copyMode = "structure_and_data",
+            batchSize = batchSize,
+        )
+        CopySessionRepository.addTable(sessionId, "items")
+        CopySessionRepository.updateSessionStatus(sessionId, "paused")
+
+        lateinit var resumedView: CopyView
+        val continueLatch = CountDownLatch(1)
+        Platform.runLater {
+            // Как и при клике "Продолжить" в SessionsView — CopyView(existingSessionId) не создаёт
+            // видимых source/target панелей, только вызывает resumeSession() в init.
+            resumedView = CopyView(existingSessionId = sessionId)
+            continueLatch.countDown()
+        }
+        continueLatch.await()
+
+        waitUntil(timeoutMs = 20_000) {
+            CopySessionRepository.getSession(sessionId)?.status in setOf("completed", "failed")
+        }
+        // Возвращаем сессию в "не running" статус, чтобы повторный запуск был осмысленным шагом,
+        // а не просто повторной проверкой уже completed-сессии.
+        CopySessionRepository.updateSessionStatus(sessionId, "paused")
+
+        val retryLatch = CountDownLatch(1)
+        Platform.runLater {
+            val startButton = resumedView.progressPanel.javaClass.getDeclaredField("startButton")
+                .apply { isAccessible = true }
+                .get(resumedView.progressPanel) as javafx.scene.control.Button
+            startButton.fire()
+            retryLatch.countDown()
+        }
+        retryLatch.await()
+
+        // updateSessionStatus(id, "running") в launchCopy() выполняется синхронно, до запуска
+        // фоновой корутины — если бы клик "Запустить" всё ещё вызывал start() (баг: там нет
+        // настроенных source/target панелей в режиме продолжения), он вернулся бы после showError()
+        // с алертом "источник не настроен", не тронув статус сессии — тот остался бы "paused".
+        // Проверяем "не paused", а не строго "running", т.к. копирование одной уже готовой таблицы
+        // может успеть завершиться до этой проверки — важен сам факт смены статуса.
+        val statusAfterRetry = CopySessionRepository.getSession(sessionId)!!.status
+        assertTrue(statusAfterRetry != "paused", "expected status to change from paused, was: $statusAfterRetry")
+    }
+
     private fun waitUntil(timeoutMs: Long, condition: () -> Boolean) = runBlocking {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
