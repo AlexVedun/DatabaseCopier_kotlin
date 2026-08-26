@@ -35,6 +35,7 @@ class ProgressPanelController(
     private val cancelButton = Button("Отменить").apply { isDisable = true }
 
     private val overallLabel = Label("Сессия не запущена")
+    private val overallProgressBar = ProgressBar(0.0).apply { prefWidth = 300.0 }
     private val tableLabel = Label("")
     private val tableProgressBar = ProgressBar(0.0).apply { prefWidth = 300.0 }
 
@@ -46,6 +47,7 @@ class ProgressPanelController(
         Label("Прогресс"),
         HBox(8.0, startButton, pauseButton, cancelButton),
         overallLabel,
+        overallProgressBar,
         tableLabel,
         tableProgressBar,
     ).apply { padding = Insets(8.0) }
@@ -154,6 +156,8 @@ class ProgressPanelController(
         pauseButton.isDisable = false
         cancelButton.isDisable = false
         overallLabel.text = "Копирование: 0 из $totalTables таблиц"
+        overallProgressBar.progress = 0.0
+        tableProgressBar.progress = 0.0
 
         val runner = CopyRunner()
         collectorJob = AppScope.scope.launch {
@@ -190,6 +194,7 @@ class ProgressPanelController(
     private fun onProgress(event: CopyProgressEvent, totalTables: Int) {
         val done = CopySessionRepository.getTables(event.sessionId).count { it.status == "done" }
         overallLabel.text = "Копирование: $done из $totalTables таблиц"
+        overallProgressBar.progress = if (totalTables > 0) done.toDouble() / totalTables else 0.0
         tableLabel.text = "${event.tableName}: ${event.rowsCopied}" +
             (event.rowsTotal?.let { " из $it" } ?: " строк")
         tableProgressBar.progress = event.rowsTotal?.let { total ->
@@ -203,6 +208,10 @@ class ProgressPanelController(
         cancelButton.isDisable = true
         val status = CopySessionRepository.getSession(sessionId)?.status
         overallLabel.text = "Сессия завершена со статусом: $status"
+        if (status == "completed") {
+            overallProgressBar.progress = 1.0
+            tableProgressBar.progress = 1.0
+        }
     }
 
     private fun showError(message: String) {
