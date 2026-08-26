@@ -2,6 +2,7 @@ package com.example.databasecopier.adapter
 
 import java.sql.Connection
 import java.sql.DriverManager
+import java.security.MessageDigest
 
 class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
 
@@ -170,14 +171,14 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
                 // Имя индекса префиксуется именем таблицы: в Postgres/MSSQL имена индексов должны
                 // быть уникальны в рамках схемы, а не только таблицы — исходное имя источника
                 // само по себе такой гарантии не даёт.
-                stmt.execute("CREATE ${uniqueSql}INDEX ${quote("${structure.name}_${idx.name}")} ON ${quote(structure.name)} ($cols)")
+                stmt.execute("CREATE ${uniqueSql}INDEX ${quote(safeIdentifier("${structure.name}_${idx.name}"))} ON ${quote(structure.name)} ($cols)")
             }
             // SQLite не поддерживает ALTER TABLE ADD CONSTRAINT CHECK — CHECK там можно задать
             // только в момент CREATE TABLE, которое createTable() (пока) не делает; пропускаем.
             if (config.type != DbType.SQLITE) {
                 for (chk in structure.checkConstraints) {
                     stmt.execute(
-                        "ALTER TABLE ${quote(structure.name)} ADD CONSTRAINT ${quote("${structure.name}_${chk.name}")} " +
+                        "ALTER TABLE ${quote(structure.name)} ADD CONSTRAINT ${quote(safeIdentifier("${structure.name}_${chk.name}"))} " +
                             "CHECK (${chk.expression})"
                     )
                 }
@@ -193,7 +194,7 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
         if (foreignKeys.isEmpty() || config.type == DbType.SQLITE) return
         connection.createStatement().use { stmt ->
             for ((idx, fk) in foreignKeys.withIndex()) {
-                val constraintName = "fk_${table}_${fk.columnName}_$idx"
+                val constraintName = safeIdentifier("fk_${table}_${fk.columnName}_$idx")
                 val sql = "ALTER TABLE ${quote(table)} ADD CONSTRAINT ${quote(constraintName)} " +
                     "FOREIGN KEY (${quote(fk.columnName)}) REFERENCES ${quote(fk.referencedTable)} (${quote(fk.referencedColumn)}) " +
                     "ON DELETE ${actionSql(fk.onDelete)} ON UPDATE ${actionSql(fk.onUpdate)}"
@@ -304,6 +305,24 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
         DbType.POSTGRESQL -> "table_schema = 'public'"
         DbType.SQLSERVER -> "table_schema = 'dbo'"
         else -> "1=1"
+    }
+
+    // Сгенерированные имена (index/constraint) складываются из имени таблицы + имени колонки
+    // источника и легко превышают лимит длины идентификатора СУБД (MySQL — 64, Postgres — 63,
+    // MSSQL — 128), особенно на длинных исходных именах — это реально ронялось на практике с
+    // ошибкой "Identifier name '...' is too long". При превышении обрезаем и добавляем короткий
+    // хеш от полного имени, чтобы не потерять уникальность разных длинных имён с общим префиксом.
+    private fun safeIdentifier(raw: String): String {
+        val maxLength = when (config.type) {
+            DbType.MYSQL -> 64
+            DbType.POSTGRESQL -> 63
+            DbType.SQLSERVER -> 128
+            DbType.SQLITE -> Int.MAX_VALUE
+        }
+        if (raw.length <= maxLength) return raw
+        val hash = MessageDigest.getInstance("MD5").digest(raw.toByteArray()).joinToString("") { "%02x".format(it) }.take(8)
+        val prefixLength = (maxLength - hash.length - 1).coerceAtLeast(0)
+        return "${raw.take(prefixLength)}_$hash"
     }
 
     private fun quote(identifier: String): String = when (config.type) {

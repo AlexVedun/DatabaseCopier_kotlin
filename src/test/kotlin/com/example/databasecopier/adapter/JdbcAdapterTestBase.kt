@@ -207,6 +207,29 @@ abstract class JdbcAdapterTestBase {
     }
 
     @Test
+    fun `truncates a generated index name that would exceed the target identifier length limit`() {
+        // Имя индекса на target собирается как "имя_таблицы_имя_индекса" (Шаг 11) — с достаточно
+        // длинным исходным именем это реально превышает лимит идентификатора (64 у MySQL, 63 у
+        // Postgres) и раньше валилось с ошибкой "Identifier name '...' is too long".
+        val longIndexName = "i".repeat(60)
+        rawConnection.createStatement().use { stmt ->
+            stmt.execute("CREATE TABLE idx_long (id INTEGER PRIMARY KEY, email VARCHAR(100))")
+            stmt.execute("CREATE INDEX $longIndexName ON idx_long (email)")
+        }
+
+        val structure = source.getTableStructure("idx_long")
+        assertEquals(1, structure.indexes.size)
+
+        target.createTable(structure.copy(name = "idx_long_target"))
+        target.createIndexesAndConstraints(structure.copy(name = "idx_long_target"))
+
+        rawConnection.createStatement().use { stmt ->
+            stmt.execute("DROP TABLE idx_long_target")
+            stmt.execute("DROP TABLE idx_long")
+        }
+    }
+
+    @Test
     fun `reads CHECK constraint from source and enforces it on target after copy`() {
         // SQLite не поддерживает ALTER TABLE ADD CONSTRAINT CHECK — createIndexesAndConstraints()
         // там осознанно пропускает CHECK (см. JdbcTargetAdapter), проверять здесь нечего.

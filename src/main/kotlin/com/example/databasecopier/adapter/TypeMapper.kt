@@ -67,7 +67,10 @@ object TypeMapper {
             LogicalType.INTEGER -> "INT"
             LogicalType.BIGINT -> "BIGINT"
             LogicalType.VARCHAR -> "VARCHAR(255)"
-            LogicalType.TEXT -> "TEXT"
+            // LogicalType.TEXT сливает TEXT/MEDIUMTEXT/LONGTEXT источника в один тип (Types.kt
+            // не хранит длину) — используем LONGTEXT (до 4 ГБ), самый ёмкий вариант, а не TEXT
+            // (лимит 64 КБ), иначе данные из LONGTEXT-колонки источника обрежутся при вставке.
+            LogicalType.TEXT -> "LONGTEXT"
             LogicalType.DECIMAL -> "DECIMAL(20,4)"
             LogicalType.BOOLEAN -> "TINYINT(1)"
             LogicalType.DATE -> "DATE"
