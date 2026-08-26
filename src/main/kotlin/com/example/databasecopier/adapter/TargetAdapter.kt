@@ -4,6 +4,9 @@ interface TargetAdapter {
     fun connect()
     fun createTable(structure: TableStructure)
     fun createForeignKeys(table: String, foreignKeys: List<ForeignKeyRef>)
+    /** Индексы и CHECK-ограничения создаются здесь, а не в createTable() — после загрузки данных
+     *  таблицы это заметно быстрее, чем поддерживать индекс при каждой вставке батча. */
+    fun createIndexesAndConstraints(structure: TableStructure)
     /** Синхронизирует счётчик автоинкремента/identity/sequence, чтобы новые строки после
      *  копирования не конфликтовали по PK с уже скопированными. Вызывается только для колонок
      *  с [ColumnDef.autoIncrement] после того, как все строки таблицы уже скопированы. */

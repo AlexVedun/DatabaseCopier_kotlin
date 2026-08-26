@@ -174,6 +174,74 @@ abstract class JdbcAdapterTestBase {
     }
 
     @Test
+    fun `reads unique index from source and enforces it on target after copy`() {
+        rawConnection.createStatement().use { stmt ->
+            stmt.execute("CREATE TABLE idx_src (id INTEGER PRIMARY KEY, email VARCHAR(100))")
+            stmt.execute("CREATE UNIQUE INDEX idx_src_email ON idx_src (email)")
+            stmt.execute("INSERT INTO idx_src (id, email) VALUES (1, 'a@example.com')")
+        }
+
+        val structure = source.getTableStructure("idx_src")
+        assertEquals(1, structure.indexes.size)
+        assertTrue(structure.indexes[0].unique)
+        assertEquals(listOf("email"), structure.indexes[0].columns)
+
+        target.createTable(structure.copy(name = "idx_target"))
+        target.insertBatch("idx_target", listOf(mapOf("id" to 1, "email" to "a@example.com")))
+        target.createIndexesAndConstraints(structure.copy(name = "idx_target"))
+
+        val duplicateInsertFails = try {
+            rawConnection.createStatement().use { stmt ->
+                stmt.execute("INSERT INTO idx_target (id, email) VALUES (2, 'a@example.com')")
+            }
+            false
+        } catch (e: Exception) {
+            true
+        }
+        assertTrue(duplicateInsertFails, "unique index должен запретить вставку дубликата email")
+
+        rawConnection.createStatement().use { stmt ->
+            stmt.execute("DROP TABLE idx_target")
+            stmt.execute("DROP TABLE idx_src")
+        }
+    }
+
+    @Test
+    fun `reads CHECK constraint from source and enforces it on target after copy`() {
+        // SQLite не поддерживает ALTER TABLE ADD CONSTRAINT CHECK — createIndexesAndConstraints()
+        // там осознанно пропускает CHECK (см. JdbcTargetAdapter), проверять здесь нечего.
+        assumeTrue(config().type != DbType.SQLITE)
+
+        rawConnection.createStatement().use { stmt ->
+            stmt.execute("CREATE TABLE chk_src (id INTEGER PRIMARY KEY, amount INTEGER CHECK (amount > 0))")
+            stmt.execute("INSERT INTO chk_src (id, amount) VALUES (1, 10)")
+        }
+
+        val structure = source.getTableStructure("chk_src")
+        assertEquals(1, structure.checkConstraints.size)
+        assertTrue(structure.checkConstraints[0].expression.contains("amount"))
+
+        target.createTable(structure.copy(name = "chk_target"))
+        target.insertBatch("chk_target", listOf(mapOf("id" to 1, "amount" to 10)))
+        target.createIndexesAndConstraints(structure.copy(name = "chk_target"))
+
+        val invalidInsertFails = try {
+            rawConnection.createStatement().use { stmt ->
+                stmt.execute("INSERT INTO chk_target (id, amount) VALUES (2, -5)")
+            }
+            false
+        } catch (e: Exception) {
+            true
+        }
+        assertTrue(invalidInsertFails, "CHECK-ограничение должно запретить вставку amount <= 0")
+
+        rawConnection.createStatement().use { stmt ->
+            stmt.execute("DROP TABLE chk_target")
+            stmt.execute("DROP TABLE chk_src")
+        }
+    }
+
+    @Test
     fun `creates foreign key constraint with referential action after both tables exist`() {
         // SQLite не поддерживает ALTER TABLE ADD CONSTRAINT FOREIGN KEY — createForeignKeys()
         // там осознанно no-op (см. JdbcTargetAdapter), проверять здесь нечего.

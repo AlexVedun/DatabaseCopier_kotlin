@@ -92,6 +92,12 @@ object CopySessionRepository {
         }
     }
 
+    fun markIndexesCopied(id: Int) = transaction {
+        CopySessionTables.update({ CopySessionTables.id eq id }) {
+            it[indexesCopied] = true
+        }
+    }
+
     fun updateTableProgress(id: Int, rowsCopied: Long, cursorJson: String?) = transaction {
         CopySessionTables.update({ CopySessionTables.id eq id }) {
             it[CopySessionTables.rowsCopied] = rowsCopied
@@ -137,5 +143,6 @@ object CopySessionRepository {
         cursorJson = this[CopySessionTables.cursorJson],
         structureCopied = this[CopySessionTables.structureCopied],
         foreignKeysCopied = this[CopySessionTables.foreignKeysCopied],
+        indexesCopied = this[CopySessionTables.indexesCopied],
     )
 }

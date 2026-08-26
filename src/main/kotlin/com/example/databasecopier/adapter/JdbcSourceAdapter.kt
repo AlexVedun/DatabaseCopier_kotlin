@@ -90,7 +90,79 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
             }
         }
 
-        return TableStructure(table, columns, primaryKey)
+        return TableStructure(table, columns, primaryKey, getIndexes(table), getCheckConstraints(table))
+    }
+
+    private fun getIndexes(table: String): List<IndexDef> {
+        data class Row(val indexName: String, val columnName: String, val unique: Boolean, val position: Int)
+        val sql = when (config.type) {
+            DbType.MYSQL ->
+                "SELECT index_name, column_name, non_unique = 0 AS is_unique, seq_in_index AS position " +
+                    "FROM information_schema.statistics " +
+                    "WHERE table_name = ? AND index_name != 'PRIMARY' AND ${schemaClause()} " +
+                    "ORDER BY index_name, seq_in_index"
+            DbType.POSTGRESQL ->
+                "SELECT ic.relname AS index_name, a.attname AS column_name, ix.indisunique AS is_unique, " +
+                    "array_position(ix.indkey, a.attnum) AS position " +
+                    "FROM pg_index ix " +
+                    "JOIN pg_class ic ON ic.oid = ix.indexrelid " +
+                    "JOIN pg_class tc ON tc.oid = ix.indrelid " +
+                    "JOIN pg_attribute a ON a.attrelid = tc.oid AND a.attnum = ANY(ix.indkey) " +
+                    "WHERE tc.relname = ? AND NOT ix.indisprimary " +
+                    "ORDER BY index_name, position"
+            DbType.SQLSERVER ->
+                "SELECT i.name AS index_name, c.name AS column_name, i.is_unique, ic.key_ordinal AS position " +
+                    "FROM sys.indexes i " +
+                    "JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id " +
+                    "JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id " +
+                    "JOIN sys.tables t ON t.object_id = i.object_id " +
+                    "WHERE t.name = ? AND i.is_primary_key = 0 AND i.name IS NOT NULL " +
+                    "ORDER BY i.name, ic.key_ordinal"
+            else -> return emptyList()
+        }
+        val rows = mutableListOf<Row>()
+        connection.prepareStatement(sql).use { ps ->
+            ps.setString(1, table)
+            ps.executeQuery().use { rs ->
+                while (rs.next()) {
+                    rows.add(Row(rs.getString("index_name"), rs.getString("column_name"), rs.getBoolean("is_unique"), rs.getInt("position")))
+                }
+            }
+        }
+        return rows.groupBy { it.indexName }.map { (name, cols) ->
+            IndexDef(name, cols.sortedBy { it.position }.map { it.columnName }, cols.first().unique)
+        }
+    }
+
+    private fun getCheckConstraints(table: String): List<CheckConstraintDef> {
+        val sql = when (config.type) {
+            DbType.MYSQL, DbType.POSTGRESQL ->
+                "SELECT tc.constraint_name, cc.check_clause FROM information_schema.table_constraints tc " +
+                    "JOIN information_schema.check_constraints cc " +
+                    "  ON tc.constraint_name = cc.constraint_name AND tc.table_schema = cc.constraint_schema " +
+                    "WHERE tc.constraint_type = 'CHECK' AND tc.table_name = ? AND ${schemaClause("tc")}"
+            DbType.SQLSERVER ->
+                "SELECT cc.name AS constraint_name, cc.definition AS check_clause " +
+                    "FROM sys.check_constraints cc JOIN sys.tables t ON cc.parent_object_id = t.object_id " +
+                    "WHERE t.name = ?"
+            else -> return emptyList()
+        }
+        // Postgres 12+ отражает обычный NOT NULL на колонке как отдельный синтетический CHECK
+        // ("col IS NOT NULL", имя вида "2200_16384_1_not_null") — это уже покрыто ColumnDef.nullable,
+        // поэтому такие записи отфильтровываются, чтобы не создавать избыточный/дублирующий CHECK.
+        val notNullPattern = Regex("""(?i)^"?[\w]+"?\s+IS\s+NOT\s+NULL$""")
+        val result = mutableListOf<CheckConstraintDef>()
+        connection.prepareStatement(sql).use { ps ->
+            ps.setString(1, table)
+            ps.executeQuery().use { rs ->
+                while (rs.next()) {
+                    val clause = rs.getString("check_clause")
+                    if (notNullPattern.matches(clause.trim())) continue
+                    result.add(CheckConstraintDef(rs.getString("constraint_name"), clause))
+                }
+            }
+        }
+        return result
     }
 
     /** SQLite не поддерживает `information_schema` — структура читается через `PRAGMA table_info`. */
@@ -126,7 +198,42 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
             )
         }
         val primaryKey = raws.filter { it.pk > 0 }.sortedBy { it.pk }.map { it.name }
-        return TableStructure(table, columns, primaryKey)
+        return TableStructure(table, columns, primaryKey, getSqliteIndexes(table), getSqliteCheckConstraints(table))
+    }
+
+    private fun getSqliteIndexes(table: String): List<IndexDef> {
+        data class IndexMeta(val name: String, val unique: Boolean, val origin: String)
+        val indexMetas = mutableListOf<IndexMeta>()
+        connection.createStatement().use { stmt ->
+            stmt.executeQuery("PRAGMA index_list(${quote(table)})").use { rs ->
+                while (rs.next()) {
+                    indexMetas.add(IndexMeta(rs.getString("name"), rs.getInt("unique") != 0, rs.getString("origin")))
+                }
+            }
+        }
+        // origin='pk' — неявный индекс, который SQLite сам создаёт для PRIMARY KEY(...);
+        // он уже отражён в structure.primaryKey и не должен дублироваться как обычный индекс.
+        return indexMetas.filter { it.origin != "pk" }.map { meta ->
+            val columns = mutableListOf<String>()
+            connection.createStatement().use { stmt ->
+                stmt.executeQuery("PRAGMA index_info(${quote(meta.name)})").use { rs ->
+                    while (rs.next()) columns.add(rs.getString("name"))
+                }
+            }
+            IndexDef(meta.name, columns, meta.unique)
+        }
+    }
+
+    /** SQLite не хранит CHECK-ограничения отдельным каталогом — извлекаются регэкспом из
+     *  исходного текста CREATE TABLE, хранящегося в sqlite_master.sql. */
+    private fun getSqliteCheckConstraints(table: String): List<CheckConstraintDef> {
+        val ddl = connection.prepareStatement("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").use { ps ->
+            ps.setString(1, table)
+            ps.executeQuery().use { rs -> if (rs.next()) rs.getString("sql") else null }
+        } ?: return emptyList()
+        return Regex("""(?i)CHECK\s*\(([^()]*(?:\([^()]*\)[^()]*)*)\)""").findAll(ddl)
+            .mapIndexed { idx, m -> CheckConstraintDef("chk_${table}_$idx", m.groupValues[1].trim()) }
+            .toList()
     }
 
     private fun readMssqlIdentityColumns(table: String): Set<String> {

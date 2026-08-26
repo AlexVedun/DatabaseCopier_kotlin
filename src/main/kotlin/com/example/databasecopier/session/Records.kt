@@ -26,4 +26,5 @@ data class CopySessionTableRecord(
     val cursorJson: String?,
     val structureCopied: Boolean,
     val foreignKeysCopied: Boolean,
+    val indexesCopied: Boolean,
 )

@@ -56,6 +56,14 @@ class CopyRunner {
                         ?: return@withContext // паузa/отмена внутри копирования данных таблицы
                 }
 
+                // Индексы/CHECK создаются после загрузки данных (быстрее, чем поддерживать индекс
+                // при каждой вставке батча) — для structure_only режима данных нет, создаются сразу.
+                if (!current.indexesCopied) {
+                    target.createIndexesAndConstraints(structure)
+                    CopySessionRepository.markIndexesCopied(current.id)
+                    current = current.copy(indexesCopied = true)
+                }
+
                 CopySessionRepository.updateTableStatus(current.id, "done")
                 emit(sessionId, current.copy(status = "done"))
             }

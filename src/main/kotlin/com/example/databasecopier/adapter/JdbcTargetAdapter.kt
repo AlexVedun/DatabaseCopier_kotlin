@@ -95,6 +95,30 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
         connection.commit()
     }
 
+    override fun createIndexesAndConstraints(structure: TableStructure) {
+        connection.createStatement().use { stmt ->
+            for (idx in structure.indexes) {
+                val uniqueSql = if (idx.unique) "UNIQUE " else ""
+                val cols = idx.columns.joinToString(", ") { quote(it) }
+                // Имя индекса префиксуется именем таблицы: в Postgres/MSSQL имена индексов должны
+                // быть уникальны в рамках схемы, а не только таблицы — исходное имя источника
+                // само по себе такой гарантии не даёт.
+                stmt.execute("CREATE ${uniqueSql}INDEX ${quote("${structure.name}_${idx.name}")} ON ${quote(structure.name)} ($cols)")
+            }
+            // SQLite не поддерживает ALTER TABLE ADD CONSTRAINT CHECK — CHECK там можно задать
+            // только в момент CREATE TABLE, которое createTable() (пока) не делает; пропускаем.
+            if (config.type != DbType.SQLITE) {
+                for (chk in structure.checkConstraints) {
+                    stmt.execute(
+                        "ALTER TABLE ${quote(structure.name)} ADD CONSTRAINT ${quote("${structure.name}_${chk.name}")} " +
+                            "CHECK (${chk.expression})"
+                    )
+                }
+            }
+        }
+        connection.commit()
+    }
+
     override fun createForeignKeys(table: String, foreignKeys: List<ForeignKeyRef>) {
         // SQLite не поддерживает ADD CONSTRAINT FOREIGN KEY через ALTER TABLE — FK там можно
         // задать только в момент CREATE TABLE. Осознанно пропускаем без ошибки: остальные

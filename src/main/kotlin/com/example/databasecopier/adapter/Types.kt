@@ -25,7 +25,19 @@ data class ColumnDef(
     val defaultValue: String? = null,
 )
 
-data class TableStructure(val name: String, val columns: List<ColumnDef>, val primaryKey: List<String>)
+data class IndexDef(val name: String, val columns: List<String>, val unique: Boolean)
+
+data class CheckConstraintDef(val name: String, val expression: String)
+
+data class TableStructure(
+    val name: String,
+    val columns: List<ColumnDef>,
+    val primaryKey: List<String>,
+    // Не включает PK — только обычные и unique-индексы, созданные отдельно (CREATE INDEX/UNIQUE
+    // KEY, а не часть PRIMARY KEY).
+    val indexes: List<IndexDef> = emptyList(),
+    val checkConstraints: List<CheckConstraintDef> = emptyList(),
+)
 
 enum class ReferentialAction { CASCADE, SET_NULL, RESTRICT, NO_ACTION, SET_DEFAULT }
 
