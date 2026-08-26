@@ -34,6 +34,57 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
         return result
     }
 
+    override fun listViews(): List<String> {
+        val sql = if (config.type == DbType.SQLITE) {
+            "SELECT name FROM sqlite_master WHERE type = 'view'"
+        } else {
+            "SELECT table_name AS name FROM information_schema.views WHERE ${schemaClause()}"
+        }
+        val result = mutableListOf<String>()
+        connection.createStatement().use { stmt ->
+            stmt.executeQuery(sql).use { rs -> while (rs.next()) result.add(rs.getString("name")) }
+        }
+        return result
+    }
+
+    override fun getViewDefinition(view: String): String {
+        val raw = when (config.type) {
+            DbType.SQLITE ->
+                connection.prepareStatement("SELECT sql FROM sqlite_master WHERE type = 'view' AND name = ?").use { ps ->
+                    ps.setString(1, view)
+                    ps.executeQuery().use { rs -> if (rs.next()) rs.getString(1) else "" }
+                }
+            // information_schema.views.view_definition в MySQL нередко урезан/переписан сервером —
+            // SHOW CREATE VIEW отдаёт оригинальный текст надёжнее.
+            DbType.MYSQL ->
+                connection.createStatement().use { stmt ->
+                    stmt.executeQuery("SHOW CREATE VIEW ${quote(view)}").use { rs ->
+                        rs.next()
+                        rs.getString("Create View")
+                    }
+                }
+            DbType.POSTGRESQL ->
+                connection.prepareStatement(
+                    "SELECT view_definition FROM information_schema.views WHERE table_name = ? AND ${schemaClause()}"
+                ).use { ps ->
+                    ps.setString(1, view)
+                    ps.executeQuery().use { rs -> if (rs.next()) rs.getString(1) else "" }
+                }
+            DbType.SQLSERVER ->
+                connection.prepareStatement(
+                    "SELECT sm.definition FROM sys.sql_modules sm JOIN sys.views v ON sm.object_id = v.object_id WHERE v.name = ?"
+                ).use { ps ->
+                    ps.setString(1, view)
+                    ps.executeQuery().use { rs -> if (rs.next()) rs.getString(1) else "" }
+                }
+        }
+        // Каждый источник возвращает разное обрамление (полный CREATE VIEW ... AS у MySQL/MSSQL/
+        // SQLite, голое тело у Postgres) — приводим к единому виду "только тело SELECT", чтобы
+        // TargetAdapter.createView() мог единообразно оборачивать его в CREATE VIEW ... AS <тело>.
+        val selectIdx = Regex("""(?i)\bSELECT\b""").find(raw)?.range?.first ?: return raw.trim().trimEnd(';')
+        return raw.substring(selectIdx).trim().trimEnd(';')
+    }
+
     override fun getTableStructure(table: String): TableStructure {
         if (config.type == DbType.SQLITE) return getSqliteTableStructure(table)
 

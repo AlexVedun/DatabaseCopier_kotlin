@@ -152,6 +152,16 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
         connection.commit()
     }
 
+    override fun createView(name: String, definition: String) {
+        connection.createStatement().use { stmt ->
+            // Тот же принцип, что и для таблиц (Шаг 4): существующая view безусловно
+            // пересоздаётся, без попытки проверить совместимость.
+            stmt.execute("DROP VIEW IF EXISTS ${quote(name)}")
+            stmt.execute("CREATE VIEW ${quote(name)} AS $definition")
+        }
+        connection.commit()
+    }
+
     override fun createIndexesAndConstraints(structure: TableStructure) {
         connection.createStatement().use { stmt ->
             for (idx in structure.indexes) {

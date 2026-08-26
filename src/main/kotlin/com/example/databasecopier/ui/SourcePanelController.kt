@@ -86,6 +86,23 @@ class SourcePanelController {
         setOnAction { tablesTable.items.forEach { it.selectedProperty.set(false) } }
     }
 
+    // Views — необязательная категория, по умолчанию все сняты (см. Шаг 13 инструкции); список
+    // может быть пуст, если в источнике нет представлений — блок тогда просто ничего не показывает.
+    private val viewsTable = TableView<TableSelection>().apply {
+        isEditable = true
+        val selectedColumn = TableColumn<TableSelection, Boolean>("").apply {
+            cellValueFactory = javafx.util.Callback { it.value.selectedProperty }
+            cellFactory = CheckBoxTableCell.forTableColumn(this)
+            isEditable = true
+            prefWidth = 40.0
+        }
+        val nameColumn = TableColumn<TableSelection, String>("View").apply {
+            cellValueFactory = javafx.util.Callback { it.value.nameProperty }
+            prefWidth = 260.0
+        }
+        columns.addAll(selectedColumn, nameColumn)
+    }
+
     private var selection: SourceSelection? = null
 
     val connectedProperty = SimpleBooleanProperty(false)
@@ -98,6 +115,8 @@ class SourcePanelController {
         dumpBox,
         HBox(8.0, selectAllButton, selectNoneButton),
         tablesTable,
+        Label("Представления (views), необязательно:"),
+        viewsTable,
     ).apply { padding = Insets(8.0) }
 
     init {
@@ -111,10 +130,13 @@ class SourcePanelController {
             connectedProperty.set(false)
             selection = null
             tablesTable.items.clear()
+            viewsTable.items.clear()
         }
     }
 
     fun selectedTables(): List<String> = tablesTable.items.filter { it.isSelected }.map { it.name }
+
+    fun selectedViews(): List<String> = viewsTable.items.filter { it.isSelected }.map { it.name }
 
     fun currentSelection(): SourceSelection? = selection
 
@@ -145,10 +167,12 @@ class SourcePanelController {
             try {
                 adapter.connect()
                 val tables = adapter.listTables()
+                val views = adapter.listViews()
                 val savedId = ConnectionRepository.save("${config.host}:${config.database}", config)
                 withContext(Dispatchers.Main) {
                     selection = SourceSelection.Connection(config, savedId)
                     tablesTable.items.setAll(tables.keys.sorted().map { TableSelection(it, true) })
+                    viewsTable.items.setAll(views.sorted().map { TableSelection(it, false) })
                     form.statusLabel.text = "Подключено. Таблиц: ${tables.size}"
                     connectedProperty.set(true)
                 }
@@ -197,6 +221,8 @@ class SourcePanelController {
                 withContext(Dispatchers.Main) {
                     selection = SourceSelection.Dump(file, dialect)
                     tablesTable.items.setAll(tables.keys.sorted().map { TableSelection(it, true) })
+                    // Парсер дампов не индексирует views (Шаг 13) — список всегда пуст для дампов.
+                    viewsTable.items.clear()
                     dumpStatusLabel.text = "Разобрано. Таблиц: ${tables.size}"
                     connectedProperty.set(true)
                 }

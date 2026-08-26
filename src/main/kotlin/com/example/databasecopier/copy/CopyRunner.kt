@@ -81,6 +81,23 @@ class CopyRunner {
             }
 
             target.enableForeignKeyChecks()
+
+            // Views создаются последним проходом, когда все выбранные таблицы (со структурой,
+            // данными, FK и индексами) уже существуют на target. Между разными диалектами тело
+            // view почти никогда не является валидным SQL — вместо предварительной проверки
+            // диалекта просто пробуем создать и, если СУБД отвергла синтаксис, помечаем view как
+            // требующую ручной адаптации, не прерывая копирование остальных объектов сессии.
+            for (view in CopySessionRepository.getViews(sessionId).filter { it.isSelected && it.status == "pending" }) {
+                if (!isRunnable(sessionId)) return@withContext
+                try {
+                    val definition = source.getViewDefinition(view.viewName)
+                    target.createView(view.viewName, definition)
+                    CopySessionRepository.updateViewStatus(view.id, "done")
+                } catch (e: Exception) {
+                    CopySessionRepository.updateViewStatus(view.id, "manual_adaptation_required")
+                }
+            }
+
             CopySessionRepository.updateSessionStatus(sessionId, "completed")
         } catch (e: Exception) {
             CopySessionRepository.updateSessionStatus(sessionId, "failed", lastError = e.message)

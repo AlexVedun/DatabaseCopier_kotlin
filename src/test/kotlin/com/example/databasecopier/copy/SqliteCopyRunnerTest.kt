@@ -1,6 +1,7 @@
 package com.example.databasecopier.copy
 
 import com.example.databasecopier.CopySessionTables
+import com.example.databasecopier.CopySessionViews
 import com.example.databasecopier.CopySessions
 import com.example.databasecopier.Connections
 import com.example.databasecopier.adapter.ConnectionConfig
@@ -36,7 +37,7 @@ class SqliteCopyRunnerTest {
         serviceDbFile = tempSqliteFile("copier-sqlite-service-")
         Database.connect("jdbc:sqlite:${serviceDbFile.absolutePath}", driver = "org.sqlite.JDBC")
         transaction {
-            SchemaUtils.createMissingTablesAndColumns(Connections, CopySessions, CopySessionTables)
+            SchemaUtils.createMissingTablesAndColumns(Connections, CopySessions, CopySessionTables, CopySessionViews)
         }
 
         val sourceFile = tempSqliteFile("copier-sqlite-source-")
@@ -89,6 +90,52 @@ class SqliteCopyRunnerTest {
                 stmt.executeQuery("SELECT COUNT(*) FROM items").use { rs ->
                     rs.next()
                     assertEquals(totalRows, rs.getInt(1))
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `copies a selected view when source and target dialects match`() = runBlocking {
+        DriverManager.getConnection("jdbc:sqlite:${sourceConfig.database}").use { conn ->
+            conn.createStatement().use { stmt ->
+                stmt.execute("CREATE VIEW items_view AS SELECT id, value FROM items WHERE id <= 5")
+            }
+        }
+
+        val sessionId = CopySessionRepository.createSession(
+            name = "sqlite to sqlite with view",
+            sourceType = "connection",
+            sourceConnectionId = null,
+            sourceDumpPath = null,
+            sourceDumpDialect = null,
+            targetConnectionId = 1,
+            copyMode = "structure_and_data",
+            batchSize = batchSize,
+        )
+        CopySessionRepository.addTable(sessionId, "items")
+        CopySessionRepository.addView(sessionId, "items_view", isSelected = true)
+        CopySessionRepository.updateSessionStatus(sessionId, "running")
+
+        val source = JdbcSourceAdapter(sourceConfig).apply { connect() }
+        val target = JdbcTargetAdapter(targetConfig).apply { connect() }
+        try {
+            CopyRunner().run(sessionId, source, target)
+        } finally {
+            source.close()
+            target.close()
+        }
+
+        val session = CopySessionRepository.getSession(sessionId)!!
+        assertEquals("completed", session.status, "lastError=${session.lastError}")
+        val view = CopySessionRepository.getViews(sessionId).first()
+        assertEquals("done", view.status)
+
+        DriverManager.getConnection("jdbc:sqlite:${targetConfig.database}").use { conn ->
+            conn.createStatement().use { stmt ->
+                stmt.executeQuery("SELECT COUNT(*) FROM items_view").use { rs ->
+                    rs.next()
+                    assertEquals(5, rs.getInt(1))
                 }
             }
         }

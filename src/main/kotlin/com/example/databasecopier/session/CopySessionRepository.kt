@@ -1,6 +1,7 @@
 package com.example.databasecopier.session
 
 import com.example.databasecopier.CopySessionTables
+import com.example.databasecopier.CopySessionViews
 import com.example.databasecopier.CopySessions
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
@@ -47,6 +48,25 @@ object CopySessionRepository {
             it[rowsCopied] = 0
             it[structureCopied] = false
         } get CopySessionTables.id)
+    }
+
+    fun addView(sessionId: Int, viewName: String, isSelected: Boolean = false): Int = transaction {
+        (CopySessionViews.insert {
+            it[copySessionId] = sessionId
+            it[CopySessionViews.viewName] = viewName
+            it[CopySessionViews.isSelected] = isSelected
+            it[status] = "pending"
+        } get CopySessionViews.id)
+    }
+
+    fun getViews(sessionId: Int): List<CopySessionViewRecord> = transaction {
+        CopySessionViews.select { CopySessionViews.copySessionId eq sessionId }.map { it.toViewRecord() }
+    }
+
+    fun updateViewStatus(id: Int, status: String) = transaction {
+        CopySessionViews.update({ CopySessionViews.id eq id }) {
+            it[CopySessionViews.status] = status
+        }
     }
 
     fun getSession(id: Int): CopySessionRecord? = transaction {
@@ -144,5 +164,13 @@ object CopySessionRepository {
         structureCopied = this[CopySessionTables.structureCopied],
         foreignKeysCopied = this[CopySessionTables.foreignKeysCopied],
         indexesCopied = this[CopySessionTables.indexesCopied],
+    )
+
+    private fun ResultRow.toViewRecord() = CopySessionViewRecord(
+        id = this[CopySessionViews.id],
+        copySessionId = this[CopySessionViews.copySessionId],
+        viewName = this[CopySessionViews.viewName],
+        isSelected = this[CopySessionViews.isSelected],
+        status = this[CopySessionViews.status],
     )
 }

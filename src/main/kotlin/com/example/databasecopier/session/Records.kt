@@ -28,3 +28,11 @@ data class CopySessionTableRecord(
     val foreignKeysCopied: Boolean,
     val indexesCopied: Boolean,
 )
+
+data class CopySessionViewRecord(
+    val id: Int,
+    val copySessionId: Int,
+    val viewName: String,
+    val isSelected: Boolean,
+    val status: String, // pending/done/manual_adaptation_required/failed
+)

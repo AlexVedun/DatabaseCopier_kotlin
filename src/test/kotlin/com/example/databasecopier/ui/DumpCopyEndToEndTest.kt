@@ -1,6 +1,7 @@
 package com.example.databasecopier.ui
 
 import com.example.databasecopier.CopySessionTables
+import com.example.databasecopier.CopySessionViews
 import com.example.databasecopier.CopySessions
 import com.example.databasecopier.Connections
 import com.example.databasecopier.dump.DumpDialect
@@ -61,7 +62,7 @@ class DumpCopyEndToEndTest {
         serviceDbFile = createTempFile("copier-dump-e2e-", ".sqlite").toFile()
         Database.connect("jdbc:sqlite:${serviceDbFile.absolutePath}", driver = "org.sqlite.JDBC")
         transaction {
-            SchemaUtils.createMissingTablesAndColumns(Connections, CopySessions, CopySessionTables)
+            SchemaUtils.createMissingTablesAndColumns(Connections, CopySessions, CopySessionTables, CopySessionViews)
         }
 
         val values = (1..totalRows).joinToString(",") { "($it,'person-$it')" }

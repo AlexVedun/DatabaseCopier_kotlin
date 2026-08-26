@@ -49,3 +49,15 @@ object CopySessionTables : Table("copy_session_tables") {
 
     override val primaryKey = PrimaryKey(id)
 }
+
+object CopySessionViews : Table("copy_session_views") {
+    val id = integer("id").autoIncrement()
+    val copySessionId = integer("copy_session_id").references(CopySessions.id)
+    val viewName = varchar("view_name", 255)
+    // По умолчанию сняты — в отличие от таблиц, views не всегда нужны при копировании данных
+    // (см. Шаг 13 инструкции).
+    val isSelected = bool("is_selected").default(false)
+    val status = varchar("status", 30).default("pending") // pending/done/manual_adaptation_required/failed
+
+    override val primaryKey = PrimaryKey(id)
+}

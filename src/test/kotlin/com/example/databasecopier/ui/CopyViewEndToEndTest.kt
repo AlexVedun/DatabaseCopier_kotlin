@@ -1,6 +1,7 @@
 package com.example.databasecopier.ui
 
 import com.example.databasecopier.CopySessionTables
+import com.example.databasecopier.CopySessionViews
 import com.example.databasecopier.CopySessions
 import com.example.databasecopier.Connections
 import javafx.application.Platform
@@ -64,7 +65,7 @@ class CopyViewEndToEndTest {
         serviceDbFile = createTempFile("copier-e2e-", ".sqlite").toFile()
         Database.connect("jdbc:sqlite:${serviceDbFile.absolutePath}", driver = "org.sqlite.JDBC")
         transaction {
-            SchemaUtils.createMissingTablesAndColumns(Connections, CopySessions, CopySessionTables)
+            SchemaUtils.createMissingTablesAndColumns(Connections, CopySessions, CopySessionTables, CopySessionViews)
         }
 
         DriverManager.getConnection(mysql.jdbcUrl, mysql.username, mysql.password).use { conn ->

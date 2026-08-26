@@ -40,6 +40,13 @@ class DumpSourceAdapter(private val file: File, private val dialect: DumpDialect
 
     override fun countRows(table: String): Long? = index[table]?.rowCount
 
+    // Парсер дампов не индексирует CREATE VIEW (см. Шаг 13 инструкции) — дампы как источник view
+    // не предоставляют.
+    override fun listViews(): List<String> = emptyList()
+
+    override fun getViewDefinition(view: String): String =
+        throw UnsupportedOperationException("Dump sources do not support views")
+
     override fun readBatch(table: String, cursor: JsonElement?, batchSize: Int): BatchResult {
         val info = index[table] ?: error("Table not found in dump: $table")
         val startOffset = cursorOffset(cursor) ?: info.dataStartOffset

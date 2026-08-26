@@ -1,6 +1,7 @@
 package com.example.databasecopier.copy
 
 import com.example.databasecopier.CopySessionTables
+import com.example.databasecopier.CopySessionViews
 import com.example.databasecopier.CopySessions
 import com.example.databasecopier.Connections
 import com.example.databasecopier.adapter.ConnectionConfig
@@ -54,7 +55,7 @@ class CopyRunnerTest {
         serviceDbFile = createTempFile("copier-test-", ".sqlite").toFile()
         Database.connect("jdbc:sqlite:${serviceDbFile.absolutePath}", driver = "org.sqlite.JDBC")
         transaction {
-            SchemaUtils.createMissingTablesAndColumns(Connections, CopySessions, CopySessionTables)
+            SchemaUtils.createMissingTablesAndColumns(Connections, CopySessions, CopySessionTables, CopySessionViews)
         }
 
         sourceConfig = ConnectionConfig(
@@ -240,6 +241,49 @@ class CopyRunnerTest {
                     assertEquals(0, rs.getInt(1))
                 }
             }
+        }
+    }
+
+    @Test
+    fun `marks view as requiring manual adaptation when source and target dialects differ`() = runBlocking {
+        // Обратные кавычки — синтаксис квотирования идентификаторов, специфичный для MySQL и
+        // синтаксически невалидный в Postgres, что гарантированно провоцирует ошибку CREATE VIEW.
+        DriverManager.getConnection(mysql.jdbcUrl, mysql.username, mysql.password).use { conn ->
+            conn.createStatement().use { stmt ->
+                stmt.execute("CREATE VIEW items_view AS SELECT `id`, `value` FROM `items`")
+            }
+        }
+
+        val sessionId = CopySessionRepository.createSession(
+            name = "view session",
+            sourceType = "connection",
+            sourceConnectionId = null,
+            sourceDumpPath = null,
+            sourceDumpDialect = null,
+            targetConnectionId = 1,
+            copyMode = "structure_and_data",
+            batchSize = batchSize,
+        )
+        CopySessionRepository.addTable(sessionId, "items")
+        CopySessionRepository.addView(sessionId, "items_view", isSelected = true)
+        CopySessionRepository.updateSessionStatus(sessionId, "running")
+
+        val source = JdbcSourceAdapter(sourceConfig).apply { connect() }
+        val target = JdbcTargetAdapter(targetConfig).apply { connect() }
+        try {
+            CopyRunner().run(sessionId, source, target)
+        } finally {
+            source.close()
+            target.close()
+        }
+
+        // Провал создания одной view не должен ронять копирование остальных объектов сессии.
+        assertEquals("completed", CopySessionRepository.getSession(sessionId)!!.status)
+        val view = CopySessionRepository.getViews(sessionId).first()
+        assertEquals("manual_adaptation_required", view.status)
+
+        DriverManager.getConnection(mysql.jdbcUrl, mysql.username, mysql.password).use { conn ->
+            conn.createStatement().use { stmt -> stmt.execute("DROP VIEW IF EXISTS items_view") }
         }
     }
 

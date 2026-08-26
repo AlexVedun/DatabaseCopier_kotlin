@@ -92,6 +92,7 @@ class ProgressPanelController(
             batchSize = target.batchSize(),
         )
         tables.forEach { CopySessionRepository.addTable(newSessionId, it) }
+        source.selectedViews().forEach { CopySessionRepository.addView(newSessionId, it, isSelected = true) }
 
         launchCopy(newSessionId, source.createAdapter(), targetConfig, tables.size)
     }
