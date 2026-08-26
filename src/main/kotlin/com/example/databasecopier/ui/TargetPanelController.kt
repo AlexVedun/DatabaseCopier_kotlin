@@ -40,7 +40,7 @@ class TargetPanelController {
     val view = VBox(
         8.0,
         Label("Результат копирования"),
-        form.grid,
+        form.row,
         HBox(8.0, structureOnlyRadio, structureAndDataRadio),
         HBox(8.0, Label("Размер батча:"), batchSizeSpinner),
     ).apply { padding = Insets(8.0) }
@@ -56,10 +56,10 @@ class TargetPanelController {
     private fun testConnection() {
         val config = ConnectionConfig(
             type = form.dbTypeCombo.value,
-            host = form.hostField.text,
+            host = form.hostField.value,
             port = form.portOrNull(),
-            database = form.databaseField.text,
-            username = form.usernameField.text,
+            database = form.databaseField.value ?: "",
+            username = form.usernameField.value,
             password = form.passwordField.text,
         )
         form.testButton.isDisable = true

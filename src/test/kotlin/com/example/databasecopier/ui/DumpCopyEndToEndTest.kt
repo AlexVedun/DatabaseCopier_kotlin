@@ -146,10 +146,10 @@ class DumpCopyEndToEndTest {
     ) {
         runOnFx {
             form.dbTypeCombo.value = type
-            form.hostField.text = host
-            form.portField.text = port.toString()
-            form.databaseField.text = database
-            form.usernameField.text = username
+            form.hostField.value = host
+            form.portField.value = port.toString()
+            form.databaseField.value = database
+            form.usernameField.value = username
             form.passwordField.text = password
         }
     }

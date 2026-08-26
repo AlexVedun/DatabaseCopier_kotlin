@@ -39,12 +39,13 @@ object CopySessionRepository {
         } get CopySessions.id)
     }
 
-    fun addTable(sessionId: Int, tableName: String, isSelected: Boolean = true): Int = transaction {
+    fun addTable(sessionId: Int, tableName: String, isSelected: Boolean = true, rowsTotal: Long? = null): Int = transaction {
         (CopySessionTables.insert {
             it[copySessionId] = sessionId
             it[sourceTableName] = tableName
             it[CopySessionTables.isSelected] = isSelected
             it[status] = "pending"
+            it[CopySessionTables.rowsTotal] = rowsTotal
             it[rowsCopied] = 0
             it[structureCopied] = false
         } get CopySessionTables.id)

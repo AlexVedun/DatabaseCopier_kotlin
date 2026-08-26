@@ -7,6 +7,7 @@ import com.example.databasecopier.security.CredentialCipher
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.select
+import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 
 object ConnectionRepository {
@@ -21,6 +22,25 @@ object ConnectionRepository {
             it[username] = config.username
             it[passwordEncrypted] = config.password?.let { pw -> CredentialCipher.encrypt(pw) }
         } get Connections.id)
+    }
+
+    // Значения для автодополнения полей формы подключения (Шаг: "запоминание вводимых
+    // параметров") — переиспользуем уже существующую таблицу Connections (в неё пишется запись
+    // при каждой успешной проверке подключения), отдельного хранилища истории не заводим.
+    fun distinctHosts(): List<String> = transaction {
+        Connections.selectAll().mapNotNull { it[Connections.host] }.filter { it.isNotBlank() }.distinct()
+    }
+
+    fun distinctPorts(): List<String> = transaction {
+        Connections.selectAll().mapNotNull { it[Connections.port] }.map { it.toString() }.distinct()
+    }
+
+    fun distinctDatabases(): List<String> = transaction {
+        Connections.selectAll().mapNotNull { it[Connections.database] }.filter { it.isNotBlank() }.distinct()
+    }
+
+    fun distinctUsernames(): List<String> = transaction {
+        Connections.selectAll().mapNotNull { it[Connections.username] }.filter { it.isNotBlank() }.distinct()
     }
 
     fun load(id: Int): ConnectionConfig? = transaction {

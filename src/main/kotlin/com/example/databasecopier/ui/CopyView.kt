@@ -35,8 +35,9 @@ class CopyView(existingSessionId: Int? = null, onBackToSessions: (() -> Unit)? =
             ).apply { padding = Insets(8.0) }
         } else {
             VBox(
-                8.0,
-                HBox(16.0, sourcePanel.view, targetPanel.view),
+                16.0,
+                sourcePanel.view,
+                targetPanel.view,
                 progressPanel.view,
             ).apply { padding = Insets(8.0) }
         }

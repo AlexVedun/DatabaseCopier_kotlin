@@ -62,7 +62,7 @@ class SourcePanelController {
         HBox(8.0, loadDumpButton, dumpStatusLabel),
     ).apply { isVisible = false; isManaged = false }
 
-    private val connectionBox = VBox(form.grid)
+    private val connectionBox = VBox(form.row)
 
     private val tablesTable = TableView<TableSelection>().apply {
         isEditable = true
@@ -104,6 +104,10 @@ class SourcePanelController {
     }
 
     private var selection: SourceSelection? = null
+    // Кол-во строк на таблицу, как его отдал SourceAdapter.listTables() (точный COUNT(*) для живых
+    // БД, дешёвая оценка для дампов — см. DumpIndexer) — сохраняется, чтобы передать в сессию как
+    // rowsTotal при старте копирования, не пересчитывая ещё раз.
+    private var lastRowCounts: Map<String, Long?> = emptyMap()
 
     val connectedProperty = SimpleBooleanProperty(false)
 
@@ -129,12 +133,15 @@ class SourcePanelController {
             dumpBox.isManaged = isDump
             connectedProperty.set(false)
             selection = null
+            lastRowCounts = emptyMap()
             tablesTable.items.clear()
             viewsTable.items.clear()
         }
     }
 
     fun selectedTables(): List<String> = tablesTable.items.filter { it.isSelected }.map { it.name }
+
+    fun rowsTotalFor(table: String): Long? = lastRowCounts[table]
 
     fun selectedViews(): List<String> = viewsTable.items.filter { it.isSelected }.map { it.name }
 
@@ -153,10 +160,10 @@ class SourcePanelController {
     private fun testConnection() {
         val config = ConnectionConfig(
             type = form.dbTypeCombo.value,
-            host = form.hostField.text,
+            host = form.hostField.value,
             port = form.portOrNull(),
-            database = form.databaseField.text,
-            username = form.usernameField.text,
+            database = form.databaseField.value ?: "",
+            username = form.usernameField.value,
             password = form.passwordField.text,
         )
         form.testButton.isDisable = true
@@ -171,6 +178,7 @@ class SourcePanelController {
                 val savedId = ConnectionRepository.save("${config.host}:${config.database}", config)
                 withContext(Dispatchers.Main) {
                     selection = SourceSelection.Connection(config, savedId)
+                    lastRowCounts = tables
                     tablesTable.items.setAll(tables.keys.sorted().map { TableSelection(it, true) })
                     viewsTable.items.setAll(views.sorted().map { TableSelection(it, false) })
                     form.statusLabel.text = "Подключено. Таблиц: ${tables.size}"
@@ -220,6 +228,7 @@ class SourcePanelController {
                 val tables = adapter.listTables()
                 withContext(Dispatchers.Main) {
                     selection = SourceSelection.Dump(file, dialect)
+                    lastRowCounts = tables
                     tablesTable.items.setAll(tables.keys.sorted().map { TableSelection(it, true) })
                     // Парсер дампов не индексирует views (Шаг 13) — список всегда пуст для дампов.
                     viewsTable.items.clear()

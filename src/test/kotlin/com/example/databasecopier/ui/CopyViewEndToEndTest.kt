@@ -129,6 +129,12 @@ class CopyViewEndToEndTest {
         val session = com.example.databasecopier.session.CopySessionRepository.getSession(sessionId)!!
         assertEquals("completed", session.status, "lastError=${session.lastError}")
 
+        // Для живых БД-подключений точный COUNT(*) уже известен из listTables() в момент
+        // "Проверить подключение" — он должен быть сохранён в сессии как rowsTotal, чтобы работал
+        // второй (по конкретной таблице) ProgressBar, а не только "N из M таблиц".
+        val tableRecord = com.example.databasecopier.session.CopySessionRepository.getTables(sessionId).first()
+        assertEquals(totalRows.toLong(), tableRecord.rowsTotal, "rowsTotal должен быть известен заранее для живого подключения")
+
         DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { conn ->
             conn.createStatement().use { stmt ->
                 stmt.executeQuery("SELECT COUNT(*) FROM people").use { rs ->
@@ -159,10 +165,10 @@ class CopyViewEndToEndTest {
     ) {
         runOnFx {
             form.dbTypeCombo.value = type
-            form.hostField.text = host
-            form.portField.text = port.toString()
-            form.databaseField.text = database
-            form.usernameField.text = username
+            form.hostField.value = host
+            form.portField.value = port.toString()
+            form.databaseField.value = database
+            form.usernameField.value = username
             form.passwordField.text = password
         }
     }
