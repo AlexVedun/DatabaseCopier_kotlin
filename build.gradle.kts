@@ -1,6 +1,7 @@
 plugins {
     kotlin("jvm") version "2.1.20"
     id("org.openjfx.javafxplugin") version "0.1.0"
+    id("com.gradleup.shadow") version "8.3.5"
     application
 }
 
@@ -70,4 +71,45 @@ tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
 
 tasks.withType<JavaCompile> {
     options.release.set(22)
+}
+
+// Шаг 14: упаковка через jpackage в самодостаточный app-image (встроенный JRE, не требует
+// установленного JDK на машине пользователя). shadowJar собирает один fat-jar со всеми
+// зависимостями (включая JavaFX-модули текущей платформы, которые javafx-плагин уже подключил
+// как обычные classpath-зависимости) — jpackage поддерживает только классический classpath-запуск
+// (--main-jar/--main-class), не модульный, поэтому JPMS module-info здесь не нужен.
+val jpackageInputDir = layout.buildDirectory.dir("jpackage-input")
+
+val prepareJpackageInput by tasks.registering(Sync::class) {
+    dependsOn(tasks.shadowJar)
+    from(tasks.shadowJar)
+    into(jpackageInputDir)
+}
+
+val jpackageAppImage by tasks.registering(Exec::class) {
+    group = "distribution"
+    description = "Собирает самодостаточный app-image (Linux) через jpackage"
+    dependsOn(prepareJpackageInput)
+
+    val outputDir = layout.buildDirectory.dir("jpackage")
+    val mainJarName = tasks.shadowJar.get().archiveFileName.get()
+
+    doFirst { outputDir.get().asFile.mkdirs() }
+
+    commandLine(
+        "jpackage",
+        "--type", "app-image",
+        "--name", "database-copier",
+        "--app-version", project.version.toString(),
+        "--input", jpackageInputDir.get().asFile.absolutePath,
+        "--main-jar", mainJarName,
+        "--main-class", "com.example.databasecopier.MainKt",
+        "--dest", outputDir.get().asFile.absolutePath,
+        // Без --runtime-image jpackage сам вызывает jlink, чтобы собрать урезанный runtime — на
+        // сборках OpenJDK от Fedora/Red Hat это падает с "java.security has been modified"
+        // (постустановочный скрипт правит java.security для system-wide crypto policy, из-за чего
+        // jlink не может создать кастомный образ). Переиспользуем полный JDK текущей сборки как
+        // готовый runtime-image — app-image получается крупнее, зато не зависит от этого багфикса.
+        "--runtime-image", System.getProperty("java.home"),
+    )
 }
