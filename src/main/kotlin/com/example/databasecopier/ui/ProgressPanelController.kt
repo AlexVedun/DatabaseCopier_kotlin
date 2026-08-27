@@ -35,14 +35,17 @@ class ProgressPanelController(
     private val cancelButton = Button("Отменить").apply { isDisable = true }
 
     private val overallLabel = Label("Сессия не запущена")
-    private val overallProgressBar = ProgressBar(0.0).apply { prefWidth = 300.0 }
+    private val overallProgressBar = ProgressBar(0.0).apply { prefWidth = 300.0; maxWidth = Double.MAX_VALUE }
     private val tableLabel = Label("")
-    private val tableProgressBar = ProgressBar(0.0).apply { prefWidth = 300.0 }
+    private val tableProgressBar = ProgressBar(0.0).apply { prefWidth = 300.0; maxWidth = Double.MAX_VALUE }
     private val errorLabel = Label("").apply { isWrapText = true; style = "-fx-text-fill: red;" }
 
     var sessionId: Int? = null
         private set
 
+    // Region по умолчанию не растёт шире своей preferred-ширины, даже если родитель (HBox с
+    // Priority.ALWAYS в CopyView) готов выделить больше места — maxWidth нужно снять явно, иначе
+    // раздел "Прогресс" остаётся прижатым к "Результату копирования" вместо растяжения до края окна.
     val view = VBox(
         8.0,
         Label("Прогресс"),
@@ -52,7 +55,7 @@ class ProgressPanelController(
         tableLabel,
         tableProgressBar,
         errorLabel,
-    ).apply { padding = Insets(8.0) }
+    ).apply { padding = Insets(8.0); maxWidth = Double.MAX_VALUE }
 
     private var collectorJob: Job? = null
 

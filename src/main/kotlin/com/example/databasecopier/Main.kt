@@ -13,7 +13,7 @@ class DatabaseCopierApp : Application() {
         initAppDatabase()
         CopySessionRepository.pauseAllRunningSessions()
 
-        val scene = Scene(StackPane(), 900.0, 700.0)
+        val scene = Scene(StackPane(), 900.0, 800.0)
         stage.title = "Database Copier"
         stage.scene = scene
         stage.show()

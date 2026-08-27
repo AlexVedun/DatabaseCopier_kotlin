@@ -19,6 +19,7 @@ import javafx.scene.control.TableView
 import javafx.scene.control.ToggleGroup
 import javafx.scene.control.cell.CheckBoxTableCell
 import javafx.scene.layout.HBox
+import javafx.scene.layout.Priority
 import javafx.scene.layout.VBox
 import javafx.stage.FileChooser
 import kotlinx.coroutines.Dispatchers
@@ -66,11 +67,17 @@ class SourcePanelController {
 
     private val tablesTable = TableView<TableSelection>().apply {
         isEditable = true
+        prefHeight = 150.0
+        maxWidth = Double.MAX_VALUE
+        // CONSTRAINED_RESIZE_POLICY растягивает колонки на всю ширину TableView, а не только
+        // саму таблицу на всю ширину окна — иначе справа от "Таблица" осталась бы пустая полоса.
+        columnResizePolicy = TableView.CONSTRAINED_RESIZE_POLICY
         val selectedColumn = TableColumn<TableSelection, Boolean>("").apply {
             cellValueFactory = javafx.util.Callback { it.value.selectedProperty }
             cellFactory = CheckBoxTableCell.forTableColumn(this)
             isEditable = true
             prefWidth = 40.0
+            maxWidth = 40.0
         }
         val nameColumn = TableColumn<TableSelection, String>("Таблица").apply {
             cellValueFactory = javafx.util.Callback { it.value.nameProperty }
@@ -90,11 +97,15 @@ class SourcePanelController {
     // может быть пуст, если в источнике нет представлений — блок тогда просто ничего не показывает.
     private val viewsTable = TableView<TableSelection>().apply {
         isEditable = true
+        prefHeight = 150.0
+        maxWidth = Double.MAX_VALUE
+        columnResizePolicy = TableView.CONSTRAINED_RESIZE_POLICY
         val selectedColumn = TableColumn<TableSelection, Boolean>("").apply {
             cellValueFactory = javafx.util.Callback { it.value.selectedProperty }
             cellFactory = CheckBoxTableCell.forTableColumn(this)
             isEditable = true
             prefWidth = 40.0
+            maxWidth = 40.0
         }
         val nameColumn = TableColumn<TableSelection, String>("View").apply {
             cellValueFactory = javafx.util.Callback { it.value.nameProperty }
@@ -111,16 +122,22 @@ class SourcePanelController {
 
     val connectedProperty = SimpleBooleanProperty(false)
 
-    val view = VBox(
+    // Элементы управления источником — слева; список таблиц/views (которые появляются только
+    // после успешного подключения) — справа, чтобы длинная таблица с сотнями строк не растягивала
+    // окно вниз под формой подключения (см. Шаг 15 инструкции).
+    private val controlsColumn = VBox(8.0, HBox(16.0, connectionModeRadio, dumpModeRadio), connectionBox, dumpBox)
+    private val tablesColumn = VBox(
         8.0,
-        Label("Источник копирования"),
-        HBox(16.0, connectionModeRadio, dumpModeRadio),
-        connectionBox,
-        dumpBox,
         HBox(8.0, selectAllButton, selectNoneButton),
         tablesTable,
         Label("Представления (views), необязательно:"),
         viewsTable,
+    ).apply { maxWidth = Double.MAX_VALUE }
+
+    val view = VBox(
+        8.0,
+        Label("Источник копирования"),
+        HBox(16.0, controlsColumn, tablesColumn).apply { HBox.setHgrow(tablesColumn, Priority.ALWAYS) },
     ).apply { padding = Insets(8.0) }
 
     init {

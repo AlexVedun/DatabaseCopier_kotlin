@@ -6,6 +6,7 @@ import javafx.scene.control.Button
 import javafx.scene.control.Label
 import javafx.scene.control.ScrollPane
 import javafx.scene.layout.HBox
+import javafx.scene.layout.Priority
 import javafx.scene.layout.VBox
 
 /**
@@ -37,8 +38,9 @@ class CopyView(existingSessionId: Int? = null, onBackToSessions: (() -> Unit)? =
             VBox(
                 16.0,
                 sourcePanel.view,
-                targetPanel.view,
-                progressPanel.view,
+                HBox(16.0, targetPanel.view, progressPanel.view).apply {
+                    HBox.setHgrow(progressPanel.view, Priority.ALWAYS)
+                },
             ).apply { padding = Insets(8.0) }
         }
     ).apply { isFitToWidth = true }

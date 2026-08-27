@@ -42,7 +42,7 @@ class TargetPanelController {
         Label("Результат копирования"),
         form.row,
         HBox(8.0, structureOnlyRadio, structureAndDataRadio),
-        HBox(8.0, Label("Размер батча:"), batchSizeSpinner),
+        HBox(8.0, Label("Размер батча:").apply { minWidth = ConnectionForm.LABEL_WIDTH }, batchSizeSpinner),
     ).apply { padding = Insets(8.0) }
 
     init {
