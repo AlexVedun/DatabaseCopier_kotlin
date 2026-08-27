@@ -85,7 +85,7 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
     private fun buildColumnSql(col: ColumnDef, isSqliteAutoIncPk: Boolean): String {
         if (isSqliteAutoIncPk) return "${quote(col.name)} INTEGER PRIMARY KEY AUTOINCREMENT"
 
-        val sqlType = TypeMapper.toSqlType(config.type, col.type)
+        val sqlType = TypeMapper.toSqlType(config.type, col.type, col.length)
         // Автоинкремент всегда генерируется нативным механизмом целевой СУБД, а не переносом
         // сырого выражения источника (nextval('seq') в MySQL не имеет смысла и наоборот).
         val autoIncrementSql = if (col.autoIncrement) when (config.type) {

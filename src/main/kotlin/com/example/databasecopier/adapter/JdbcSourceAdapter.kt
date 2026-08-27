@@ -10,6 +10,13 @@ import java.sql.ResultSet
 
 class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
 
+    companion object {
+        // SQLite не хранит длину отдельно от объявленного типа (PRAGMA table_info возвращает
+        // её как часть строки, например "VARCHAR(100)") — извлекаем тем же способом, что и для
+        // дампов, см. CreateTableParser.
+        private val VARCHAR_LENGTH_REGEX = Regex("""(?i)^(?:varchar|char)\s*\((\d+)\)""")
+    }
+
     private lateinit var connection: Connection
 
     override fun connect() {
@@ -92,11 +99,11 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
         val columnComments = getColumnComments(table)
         val columns = mutableListOf<ColumnDef>()
         val columnsSql = if (config.type == DbType.MYSQL) {
-            "SELECT column_name, data_type, is_nullable, extra, column_default, collation_name FROM information_schema.columns " +
-                "WHERE table_name = ? AND ${schemaClause()} ORDER BY ordinal_position"
+            "SELECT column_name, data_type, is_nullable, extra, column_default, collation_name, character_maximum_length " +
+                "FROM information_schema.columns WHERE table_name = ? AND ${schemaClause()} ORDER BY ordinal_position"
         } else {
-            "SELECT column_name, data_type, is_nullable, column_default, collation_name FROM information_schema.columns " +
-                "WHERE table_name = ? AND ${schemaClause()} ORDER BY ordinal_position"
+            "SELECT column_name, data_type, is_nullable, column_default, collation_name, character_maximum_length " +
+                "FROM information_schema.columns WHERE table_name = ? AND ${schemaClause()} ORDER BY ordinal_position"
         }
         connection.prepareStatement(columnsSql).use { ps ->
             ps.setString(1, table)
@@ -121,6 +128,11 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
                             defaultValue = if (autoIncrement) null else rawDefault,
                             collation = rs.getString("collation_name"),
                             comment = columnComments[name],
+                            // getLong, а не getInt: для TEXT/LONGTEXT character_maximum_length может
+                            // быть 4294967295 (не помещается в Int) — такие значения не относятся к
+                            // VARCHAR (для которого только и значим length) и просто отбрасываются.
+                            length = rs.getLong("character_maximum_length")
+                                .takeIf { !rs.wasNull() && it in 1..Int.MAX_VALUE }?.toInt(),
                         )
                     )
                 }
@@ -294,6 +306,7 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
                 nullable = !r.notNull,
                 autoIncrement = autoIncrement,
                 defaultValue = if (autoIncrement) null else r.default,
+                length = VARCHAR_LENGTH_REGEX.find(r.type)?.groupValues?.get(1)?.toIntOrNull(),
             )
         }
         val primaryKey = raws.filter { it.pk > 0 }.sortedBy { it.pk }.map { it.name }

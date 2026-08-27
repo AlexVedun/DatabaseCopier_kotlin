@@ -27,6 +27,11 @@ data class ColumnDef(
     // правило, не является валидным именем в другом (см. JdbcTargetAdapter.buildColumnSql).
     val collation: String? = null,
     val comment: String? = null,
+    // Значимо только для LogicalType.VARCHAR — фактическая длина колонки источника
+    // (character_maximum_length). Без неё TypeMapper.toSqlType() был вынужден использовать
+    // фиксированный VARCHAR(255) для любой длины источника, что либо раздувало составные индексы
+    // на target сверх лимита длины ключа СУБД, либо (для VARCHAR(256+) источника) обрезало данные.
+    val length: Int? = null,
 )
 
 data class IndexDef(val name: String, val columns: List<String>, val unique: Boolean)

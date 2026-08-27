@@ -9,7 +9,10 @@ import com.example.databasecopier.adapter.TypeMapper
 object CreateTableParser {
 
     private val NAME_REGEX = Regex("""(?is)create\s+table\s+(?:if\s+not\s+exists\s+)?[`"]?([\w]+)[`"]?\s*\(""")
-    private val COLUMN_NAME_TYPE_REGEX = Regex("""^[`"]?([\w]+)[`"]?\s+([\w]+)(?:\s*\([^)]*\))?""")
+    private val COLUMN_NAME_TYPE_REGEX = Regex("""^[`"]?([\w]+)[`"]?\s+([\w]+)(?:\s*\(([^)]*)\))?""")
+    // Только для VARCHAR/CHAR "(N)" — это длина строки; у DECIMAL/NUMERIC "(N,M)" это
+    // точность/масштаб, а не длина, поэтому не трогаем при наличии запятой.
+    private val VARCHAR_LENGTH_REGEX = Regex("""^\d+$""")
     private val FK_REGEX = Regex(
         """(?is)FOREIGN\s+KEY\s*\(\s*[`"]?([\w]+)[`"]?\s*\)\s*REFERENCES\s+[`"]?([\w]+)[`"]?\s*\(\s*[`"]?([\w]+)[`"]?\s*\)""" +
             """(?:\s*ON\s+DELETE\s+(CASCADE|SET\s+NULL|RESTRICT|NO\s+ACTION|SET\s+DEFAULT))?""" +
@@ -74,13 +77,15 @@ object CreateTableParser {
                     val colMatch = COLUMN_NAME_TYPE_REGEX.find(entry) ?: continue
                     val colName = colMatch.groupValues[1]
                     val sqlType = colMatch.groupValues[2]
+                    val typeArgs = colMatch.groupValues[3].trim()
+                    val length = typeArgs.takeIf { VARCHAR_LENGTH_REGEX.matches(it) }?.toIntOrNull()
                     val nullable = !upper.contains("NOT NULL")
                     if (upper.contains("PRIMARY KEY")) primaryKey.add(colName)
                     val autoIncrement = upper.contains("AUTO_INCREMENT") || upper.contains("AUTOINCREMENT") ||
                         sqlType.lowercase() in SERIAL_TYPES
                     val defaultValue = if (autoIncrement) null else DEFAULT_REGEX.find(entry)?.groupValues?.get(1)
                     columns.add(
-                        ColumnDef(colName, TypeMapper.fromSqlType(dbType, sqlType), nullable, autoIncrement, defaultValue)
+                        ColumnDef(colName, TypeMapper.fromSqlType(dbType, sqlType), nullable, autoIncrement, defaultValue, length = length)
                     )
                 }
             }

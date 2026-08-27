@@ -62,11 +62,16 @@ object TypeMapper {
         }
     }
 
-    fun toSqlType(dbType: DbType, type: LogicalType): String = when (dbType) {
+    // length значим только для LogicalType.VARCHAR — фактическая длина колонки источника
+    // (см. ColumnDef.length). Раньше VARCHAR всегда становился VARCHAR(255) независимо от
+    // исходной длины — это либо раздувало составные индексы на target сверх лимита длины ключа
+    // СУБД (например MySQL "max key length is 3072 bytes" при исходных VARCHAR(100)),
+    // либо обрезало бы данные для VARCHAR длиннее 255 в источнике.
+    fun toSqlType(dbType: DbType, type: LogicalType, length: Int? = null): String = when (dbType) {
         DbType.MYSQL -> when (type) {
             LogicalType.INTEGER -> "INT"
             LogicalType.BIGINT -> "BIGINT"
-            LogicalType.VARCHAR -> "VARCHAR(255)"
+            LogicalType.VARCHAR -> "VARCHAR(${length?.takeIf { it > 0 } ?: 255})"
             // LogicalType.TEXT сливает TEXT/MEDIUMTEXT/LONGTEXT источника в один тип (Types.kt
             // не хранит длину) — используем LONGTEXT (до 4 ГБ), самый ёмкий вариант, а не TEXT
             // (лимит 64 КБ), иначе данные из LONGTEXT-колонки источника обрежутся при вставке.
@@ -81,7 +86,7 @@ object TypeMapper {
         DbType.POSTGRESQL -> when (type) {
             LogicalType.INTEGER -> "INTEGER"
             LogicalType.BIGINT -> "BIGINT"
-            LogicalType.VARCHAR -> "VARCHAR(255)"
+            LogicalType.VARCHAR -> "VARCHAR(${length?.takeIf { it > 0 } ?: 255})"
             LogicalType.TEXT -> "TEXT"
             LogicalType.DECIMAL -> "NUMERIC(20,4)"
             LogicalType.BOOLEAN -> "BOOLEAN"
@@ -100,7 +105,12 @@ object TypeMapper {
         DbType.SQLSERVER -> when (type) {
             LogicalType.INTEGER -> "INT"
             LogicalType.BIGINT -> "BIGINT"
-            LogicalType.VARCHAR -> "NVARCHAR(255)"
+            // NVARCHAR без MAX ограничен 4000 символами — длина сверх этого лимита переносится
+            // как NVARCHAR(MAX), а не обрезается.
+            LogicalType.VARCHAR -> {
+                val len = length?.takeIf { it > 0 } ?: 255
+                if (len > 4000) "NVARCHAR(MAX)" else "NVARCHAR($len)"
+            }
             LogicalType.TEXT -> "NVARCHAR(MAX)"
             LogicalType.DECIMAL -> "DECIMAL(20,4)"
             LogicalType.BOOLEAN -> "BIT"
