@@ -102,7 +102,13 @@ val jpackageAppImage by tasks.registering(Exec::class) {
     val outputDir = layout.buildDirectory.dir("jpackage")
     val mainJarName = tasks.shadowJar.get().archiveFileName.get()
 
-    doFirst { outputDir.get().asFile.mkdirs() }
+    // jpackage отказывается писать в уже существующий "<dest>/<name>" (падает с "Application
+    // destination directory ... already exists") — без очистки задача несостоятельна при повторном
+    // запуске, что ломает appImage при каждом втором ./gradlew appImage подряд.
+    doFirst {
+        delete(outputDir.get().dir("database-copier"))
+        outputDir.get().asFile.mkdirs()
+    }
 
     commandLine(
         "jpackage",
@@ -120,4 +126,73 @@ val jpackageAppImage by tasks.registering(Exec::class) {
         // готовый runtime-image — app-image получается крупнее, зато не зависит от этого багфикса.
         "--runtime-image", System.getProperty("java.home"),
     )
+}
+
+// Шаг 17: jpackage --type app-image даёт КАТАЛОГ (bin/ + lib/ со встроенным JRE), а не единый файл —
+// оборачиваем этот каталог в AppDir (AppRun + .desktop + иконка на верхнем уровне, см.
+// packaging/appimage/) и собираем его в настоящий однофайловый .AppImage через appimagetool.
+val appImageDir = layout.buildDirectory.dir("AppDir")
+
+val prepareAppDir by tasks.registering(Sync::class) {
+    group = "distribution"
+    description = "Собирает AppDir (jpackage app-image + AppRun/.desktop/иконка) для appimagetool"
+    dependsOn(jpackageAppImage)
+
+    from(layout.buildDirectory.dir("jpackage/database-copier"))
+    from("packaging/appimage") {
+        include("AppRun", "database-copier.desktop", "database-copier.png")
+    }
+    into(appImageDir)
+
+    // Встроенный JRE от jpackage содержит read-only CDS-архивы (*.jsa, права 444) — при повторном
+    // запуске Sync не может перезаписать уже существующий read-only файл в AppDir тем же именем
+    // ("Відмовлено у доступі"). Проще снести AppDir целиком перед синком, чем разбираться, какие
+    // файлы read-only.
+    doFirst {
+        val dir = appImageDir.get().asFile
+        if (dir.exists()) {
+            dir.walkBottomUp().forEach { it.setWritable(true) }
+            dir.deleteRecursively()
+        }
+    }
+
+    // Sync копирует права доступа как есть, но AppRun/desktop-файл в git всегда без exec-бита —
+    // appimagetool требует, чтобы AppRun был исполняемым, иначе получившийся .AppImage не запустится.
+    doLast {
+        appImageDir.get().file("AppRun").asFile.setExecutable(true)
+        appImageDir.get().file("database-copier.desktop").asFile.setExecutable(true)
+    }
+}
+
+val appImage by tasks.registering(Exec::class) {
+    group = "distribution"
+    description = "Собирает однофайловый .AppImage (Linux) из AppDir через appimagetool"
+    dependsOn(prepareAppDir)
+
+    // appimagetool сам по себе распространяется как AppImage; путь переопределяется через
+    // -PappimagetoolPath=..., по умолчанию берётся из домашней директории пользователя.
+    val appimagetoolPath = project.findProperty("appimagetoolPath")?.toString()
+        ?: "${System.getProperty("user.home")}/appimagetool.AppImage"
+
+    val outputDir = layout.buildDirectory.dir("appimage")
+    val outputFile = outputDir.get().file("database-copier-${project.version}-x86_64.AppImage")
+
+    doFirst {
+        outputDir.get().asFile.mkdirs()
+        check(File(appimagetoolPath).exists()) {
+            "appimagetool не найден по пути $appimagetoolPath — передайте -PappimagetoolPath=<путь>"
+        }
+    }
+
+    // --appimage-extract-and-run вместо прямого запуска appimagetool: сам appimagetool — это
+    // AppImage, а его штатный способ монтирования через FUSE недоступен в песочницах/контейнерах
+    // без /dev/fuse — extract-and-run распаковывает и запускает без монтирования.
+    commandLine(
+        appimagetoolPath,
+        "--appimage-extract-and-run",
+        appImageDir.get().asFile.absolutePath,
+        outputFile.asFile.absolutePath,
+    )
+
+    doLast { println("Готово: ${outputFile.asFile.absolutePath}") }
 }

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Database Copier
+Exec=AppRun
+Icon=database-copier
+Categories=Utility;
+Terminal=false

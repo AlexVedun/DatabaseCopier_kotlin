@@ -1,0 +1,5 @@
+#!/bin/sh
+# jpackage кладёт launcher в bin/<name> относительно корня app-image — этот же корень
+# становится корнем AppDir, поэтому просто запускаем его relative к своему собственному пути.
+HERE="$(dirname "$(readlink -f "${0}")")"
+exec "$HERE/bin/database-copier" "$@"
