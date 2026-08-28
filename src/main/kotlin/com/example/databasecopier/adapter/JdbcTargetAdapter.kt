@@ -168,7 +168,16 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
     override fun createIndexesAndConstraints(structure: TableStructure) {
         connection.createStatement().use { stmt ->
             for (idx in structure.indexes) {
-                val uniqueSql = if (idx.unique) "UNIQUE " else ""
+                // FULLTEXT/SPATIAL не поддерживаются вне MySQL/MariaDB в том же синтаксисе (Postgres
+                // требует отдельных GIN/GiST-индексов с другим набором операторов, что не является
+                // эквивалентным автоматическим переносом) — такой индекс просто пропускается на
+                // non-MySQL target, вместо того чтобы падать или тихо создавать бесполезный BTREE.
+                if (idx.kind != IndexKind.NORMAL && config.type != DbType.MYSQL) continue
+                val keywordSql = when (idx.kind) {
+                    IndexKind.FULLTEXT -> "FULLTEXT "
+                    IndexKind.SPATIAL -> "SPATIAL "
+                    IndexKind.NORMAL -> if (idx.unique) "UNIQUE " else ""
+                }
                 val cols = idx.columns.joinToString(", ") { quote(it) }
                 // Имя переносится как есть (только санация длины, см. safeIdentifier) — по
                 // требованию: если два разных объекта источника конфликтуют по имени на target
@@ -177,7 +186,7 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
                 val name = safeIdentifier(idx.name)
                 executeCreateOrDetectCollision(
                     stmt,
-                    "CREATE ${uniqueSql}INDEX ${quote(name)} ON ${quote(structure.name)} ($cols)",
+                    "CREATE ${keywordSql}INDEX ${quote(name)} ON ${quote(structure.name)} ($cols)",
                     objectLabel = "Индекс",
                     objectName = name,
                     ownerTable = structure.name,

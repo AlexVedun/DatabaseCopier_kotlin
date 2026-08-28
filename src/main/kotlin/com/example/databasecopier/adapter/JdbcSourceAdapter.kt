@@ -205,10 +205,10 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
     }
 
     private fun getIndexes(table: String): List<IndexDef> {
-        data class Row(val indexName: String, val columnName: String, val unique: Boolean, val position: Int)
+        data class Row(val indexName: String, val columnName: String, val unique: Boolean, val position: Int, val indexType: String?)
         val sql = when (config.type) {
             DbType.MYSQL ->
-                "SELECT index_name, column_name, non_unique = 0 AS is_unique, seq_in_index AS position " +
+                "SELECT index_name, column_name, non_unique = 0 AS is_unique, seq_in_index AS position, index_type " +
                     "FROM information_schema.statistics " +
                     "WHERE table_name = ? AND index_name != 'PRIMARY' AND ${schemaClause()} " +
                     "ORDER BY index_name, seq_in_index"
@@ -236,12 +236,21 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
             ps.setString(1, table)
             ps.executeQuery().use { rs ->
                 while (rs.next()) {
-                    rows.add(Row(rs.getString("index_name"), rs.getString("column_name"), rs.getBoolean("is_unique"), rs.getInt("position")))
+                    val indexType = if (config.type == DbType.MYSQL) rs.getString("index_type") else null
+                    rows.add(Row(rs.getString("index_name"), rs.getString("column_name"), rs.getBoolean("is_unique"), rs.getInt("position"), indexType))
                 }
             }
         }
         return rows.groupBy { it.indexName }.map { (name, cols) ->
-            IndexDef(name, cols.sortedBy { it.position }.map { it.columnName }, cols.first().unique)
+            // FULLTEXT/SPATIAL индексы MySQL не подчиняются обычному лимиту длины ключа BTREE-индекса —
+            // без различения типа они пересоздавались бы на target как обычный составной CREATE INDEX
+            // и падали с "Specified key was too long" на любых TEXT/BLOB-колонках (см. Types.kt).
+            val kind = when (cols.first().indexType?.uppercase()) {
+                "FULLTEXT" -> IndexKind.FULLTEXT
+                "SPATIAL" -> IndexKind.SPATIAL
+                else -> IndexKind.NORMAL
+            }
+            IndexDef(name, cols.sortedBy { it.position }.map { it.columnName }, cols.first().unique, kind)
         }
     }
 

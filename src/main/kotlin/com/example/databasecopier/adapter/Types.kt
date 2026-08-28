@@ -34,7 +34,18 @@ data class ColumnDef(
     val length: Int? = null,
 )
 
-data class IndexDef(val name: String, val columns: List<String>, val unique: Boolean)
+// FULLTEXT/SPATIAL индексы не имеют обычного ограничения на длину ключа (в отличие от BTREE) —
+// если их создавать как обычный составной CREATE INDEX (как раньше, без учёта типа), MySQL/MariaDB
+// падает с "Specified key was too long" на любой таблице с полнотекстовым индексом по TEXT/BLOB-
+// колонкам (например mdl_search_simpledb_index в Moodle), даже когда сами колонки скопированы верно.
+enum class IndexKind { NORMAL, FULLTEXT, SPATIAL }
+
+data class IndexDef(
+    val name: String,
+    val columns: List<String>,
+    val unique: Boolean,
+    val kind: IndexKind = IndexKind.NORMAL,
+)
 
 data class CheckConstraintDef(val name: String, val expression: String)
 
