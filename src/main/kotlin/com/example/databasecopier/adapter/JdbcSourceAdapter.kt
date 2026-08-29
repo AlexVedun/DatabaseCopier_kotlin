@@ -281,6 +281,13 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
         // ("col IS NOT NULL", имя вида "2200_16384_1_not_null") — это уже покрыто ColumnDef.nullable,
         // поэтому такие записи отфильтровываются, чтобы не создавать избыточный/дублирующий CHECK.
         val notNullPattern = Regex("""(?i)^"?[\w]+"?\s+IS\s+NOT\s+NULL$""")
+        // MySQL 8 автоматически добавляет CHECK (json_valid(`col`)) на каждую JSON-колонку — это
+        // системный чек, не часть пользовательской схемы. Он копируется буквально (с backtick-
+        // квотированием идентификатора, которое не является валидным синтаксисом ни в Postgres, ни
+        // в MSSQL — "syntax error at or near ')'"), да и функции json_valid() в этих СУБД просто нет.
+        // Валидность JSON на target и так обеспечивается самим типом колонки (JSONB у Postgres
+        // валидирует при вставке), поэтому такой чек безопасно и достаточно пропустить целиком.
+        val mysqlJsonValidPattern = Regex("""(?i)^json_valid\(`[\w]+`\)$""")
         val result = mutableListOf<CheckConstraintDef>()
         connection.prepareStatement(sql).use { ps ->
             ps.setString(1, table)
@@ -288,6 +295,7 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
                 while (rs.next()) {
                     val clause = rs.getString("check_clause")
                     if (notNullPattern.matches(clause.trim())) continue
+                    if (config.type == DbType.MYSQL && mysqlJsonValidPattern.matches(clause.trim())) continue
                     result.add(CheckConstraintDef(rs.getString("constraint_name"), clause))
                 }
             }
