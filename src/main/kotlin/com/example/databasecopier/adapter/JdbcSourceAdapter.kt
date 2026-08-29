@@ -99,7 +99,14 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
         val columnComments = getColumnComments(table)
         val columns = mutableListOf<ColumnDef>()
         val columnsSql = if (config.type == DbType.MYSQL) {
-            "SELECT column_name, data_type, is_nullable, extra, column_default, collation_name, character_maximum_length " +
+            // column_type (а не только data_type) нужен, чтобы отличить tinyint(1) от прочих
+            // tinyint — data_type для обоих просто "tinyint", теряя ширину. Это важно, потому что
+            // mysql-connector-j по умолчанию (tinyInt1isBit=true) читает значения tinyint(1) как
+            // Boolean через getObject(), а не Int — если TypeMapper классифицирует такую колонку
+            // как INTEGER (как это было раньше), target-колонка создаётся INTEGER, но в неё летят
+            // Boolean-значения, и JDBC-драйвер target'а падает с "column is of type X but expression
+            // is of type boolean" (например Postgres).
+            "SELECT column_name, data_type, column_type, is_nullable, extra, column_default, collation_name, character_maximum_length " +
                 "FROM information_schema.columns WHERE table_name = ? AND ${schemaClause()} ORDER BY ordinal_position"
         } else {
             "SELECT column_name, data_type, is_nullable, column_default, collation_name, character_maximum_length " +
@@ -120,7 +127,10 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
                     columns.add(
                         ColumnDef(
                             name = name,
-                            type = TypeMapper.fromSqlType(config.type, rs.getString("data_type")),
+                            type = TypeMapper.fromSqlType(
+                                config.type,
+                                if (config.type == DbType.MYSQL) rs.getString("column_type") else rs.getString("data_type"),
+                            ),
                             nullable = rs.getString("is_nullable") == "YES",
                             autoIncrement = autoIncrement,
                             // nextval(...)/identity уже подразумевают генерацию значения — обычный
