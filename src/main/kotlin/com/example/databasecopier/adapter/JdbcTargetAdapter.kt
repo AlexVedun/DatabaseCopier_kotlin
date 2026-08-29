@@ -99,7 +99,7 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
             DbType.SQLITE -> ""
         } else ""
         val nullability = if (col.nullable) "" else " NOT NULL"
-        val defaultSql = safeDefaultSql(col.defaultValue)?.let { " DEFAULT $it" } ?: ""
+        val defaultSql = safeDefaultSql(col.defaultValue, col.type)?.let { " DEFAULT $it" } ?: ""
         val collationSql = safeCollationSql(col.collation)
         // MySQL — единственная СУБД здесь, где комментарий колонки можно (и нужно) задать прямо
         // в CREATE TABLE; для Postgres/MSSQL это отдельный statement после создания таблицы,
@@ -122,9 +122,21 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
     // Переносим только простые литералы дефолта (число/строка/NULL/CURRENT_TIMESTAMP) — сложные
     // SQL-выражения источника специфичны для его диалекта, транслятор выражений не пишем
     // (см. Шаг 10 инструкции), такие дефолты молча пропускаются.
-    private fun safeDefaultSql(raw: String?): String? {
+    private fun safeDefaultSql(raw: String?, type: LogicalType): String? {
         if (raw == null) return null
         val trimmed = raw.trim()
+        // MySQL хранит DEFAULT булевой tinyint(1)-колонки как сырое число ('0'/'1', иногда в
+        // кавычках) — оно и остаётся числом в остальных ветках ниже. Postgres не приводит integer
+        // к boolean неявно даже в DEFAULT-выражении ("column is of type boolean but default
+        // expression is of type integer"), поэтому для BOOLEAN-колонки нормализуем 0/1 в TRUE/FALSE
+        // до общих числовых/строковых веток. MySQL/MSSQL/SQLite сами принимают 0/1 как валидный
+        // boolean/bit-литерал, так что для них это не нужно.
+        if (type == LogicalType.BOOLEAN && config.type == DbType.POSTGRESQL) {
+            when (trimmed.trim('\'').lowercase()) {
+                "0", "false" -> return "FALSE"
+                "1", "true" -> return "TRUE"
+            }
+        }
         return when {
             trimmed.equals("NULL", ignoreCase = true) -> "NULL"
             trimmed.uppercase().startsWith("CURRENT_TIMESTAMP") -> "CURRENT_TIMESTAMP"
