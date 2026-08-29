@@ -109,13 +109,23 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
     }
 
     // Имя collation одного диалекта почти никогда не валидно в другом (например Postgres
-    // "en_US.utf8" против MySQL "utf8mb4_unicode_ci"), поэтому переносим только для MySQL/MSSQL,
-    // где формат имени — простой идентификатор, и только если он проходит базовую санацию.
-    // Postgres/SQLite как target — молча пропускаем.
+    // "en_US.utf8" против MySQL "utf8mb4_unicode_ci"), поэтому переносим только для MySQL/MSSQL —
+    // но раньше проверялось лишь то, что имя из источника — простой идентификатор, без учёта того,
+    // что этот идентификатор в принципе может быть из ДРУГОГО диалекта (например MySQL-источник →
+    // MSSQL-target буквально копировал "utf8mb4_unicode_ci" в COLLATE, а MSSQL такое название не
+    // знает: "Invalid collation 'utf8mb4_unicode_ci'"). JdbcTargetAdapter не знает тип источника,
+    // поэтому вместо этого валидируем по форме, характерной именно для target-диалекта: у MySQL
+    // имена всегда строчные ("charset_variant_ci/cs/bin"), у MSSQL — всегда заканчиваются на
+    // "_CI_AS"/"_CI_AI"/"_CS_AS"/"_CS_AI" (опционально с доп. суффиксами вроде "_SC"/"_UTF8").
+    // Postgres/SQLite как target — молча пропускаем, там формат совсем другой.
     private fun safeCollationSql(raw: String?): String {
         if (raw == null) return ""
-        if (config.type != DbType.MYSQL && config.type != DbType.SQLSERVER) return ""
-        if (!Regex("""^[A-Za-z0-9_]+$""").matches(raw)) return ""
+        val pattern = when (config.type) {
+            DbType.MYSQL -> Regex("""^[a-z0-9]+(_[a-z0-9]+)*$""")
+            DbType.SQLSERVER -> Regex("""^[A-Za-z0-9]+(_[A-Za-z0-9]+)*_C[IS]_A[IS](_[A-Za-z0-9]+)*$""")
+            else -> return ""
+        }
+        if (!pattern.matches(raw)) return ""
         return " COLLATE $raw"
     }
 
