@@ -163,12 +163,13 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
     }
 
     // Кэшируется на всю сессию (наполняется одним запросом при первом обращении), а не на таблицу —
-    // JOIN information_schema.table_constraints × key_column_usage по table_name=? реально
-    // наблюдался зависающим на МИНУТЫ на одном вызове против удалённого MySQL-сервера с большим
-    // количеством таблиц (I_S-джойны на MySQL не всегда проталкивают фильтр внутрь и могут
-    // разворачиваться в полный скан словаря); при 493 таблицах в сессии это означало бы копирование,
-    // не начинающееся вообще никогда. Один запрос без фильтра по table_name на всю схему — тот же
-    // самый JOIN, но выполняется один раз, а не N раз.
+    // изначальный JOIN information_schema.table_constraints × key_column_usage по table_name=?
+    // реально наблюдался зависающим на МИНУТЫ на одном вызове против удалённого MySQL-сервера,
+    // хостящего десятки схем: подтверждено дважды через jstack (блокировка на чтении сокета внутри
+    // executeQuery) и напрямую в phpMyAdmin (тот же самый JOIN упал по Gateway Timeout). JOIN двух
+    // I_S-представлений на MySQL не всегда проталкивает фильтр внутрь каждого представления и может
+    // разворачиваться в материализацию по всем схемам сервера, а не только по нужной. При 493
+    // таблицах в сессии это означало бы копирование, не начинающееся вообще никогда.
     private var primaryKeysBySchema: Map<String, List<String>>? = null
 
     private fun primaryKeyColumns(table: String): List<String> {
@@ -177,15 +178,27 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
     }
 
     private fun loadAllPrimaryKeys(): Map<String, List<String>> {
-        // constraint_name для PRIMARY KEY в MySQL всегда буквально "PRIMARY" — одинаково для
-        // всех таблиц схемы, поэтому join обязан фильтроваться ещё и по table_name, иначе
-        // подхватятся PK-колонки других таблиц с тем же именем constraint.
-        val sql = "SELECT tc.table_name, kcu.column_name FROM information_schema.table_constraints tc " +
-            "JOIN information_schema.key_column_usage kcu " +
-            "  ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema " +
-            "  AND tc.table_name = kcu.table_name " +
-            "WHERE tc.constraint_type = 'PRIMARY KEY' AND ${schemaClause("tc")} " +
-            "ORDER BY tc.table_name, kcu.ordinal_position"
+        // Для MySQL join с table_constraints вообще не нужен: constraint_name для PRIMARY KEY в
+        // MySQL всегда буквально "PRIMARY" — этого достаточно, чтобы отфильтровать нужные строки
+        // прямо в key_column_usage, без второй I_S-таблицы. Один отфильтрованный SELECT по одной
+        // таблице — именно то, что не провоцирует деградацию оптимизатора, в отличие от JOIN двух
+        // I_S-представлений (см. комментарий у primaryKeysBySchema).
+        //
+        // Postgres/MSSQL этой деградацией не страдают (их каталоги — обычные системные таблицы, а
+        // не пересчитываемые на лету представления) и не гарантируют "PRIMARY" как имя constraint'а,
+        // поэтому для них join остаётся необходимым.
+        val sql = if (config.type == DbType.MYSQL) {
+            "SELECT table_name, column_name FROM information_schema.key_column_usage " +
+                "WHERE constraint_name = 'PRIMARY' AND ${schemaClause()} " +
+                "ORDER BY table_name, ordinal_position"
+        } else {
+            "SELECT tc.table_name, kcu.column_name FROM information_schema.table_constraints tc " +
+                "JOIN information_schema.key_column_usage kcu " +
+                "  ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema " +
+                "  AND tc.table_name = kcu.table_name " +
+                "WHERE tc.constraint_type = 'PRIMARY KEY' AND ${schemaClause("tc")} " +
+                "ORDER BY tc.table_name, kcu.ordinal_position"
+        }
         val result = LinkedHashMap<String, MutableList<String>>()
         connection.createStatement().use { stmt ->
             stmt.executeQuery(sql).use { rs ->
@@ -301,16 +314,62 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
         return cache[table] ?: emptyList()
     }
 
+    private data class RawCheck(val tableName: String, val constraintName: String, val checkClause: String)
+
     private fun loadAllCheckConstraints(): Map<String, List<CheckConstraintDef>> {
-        val sql = when (config.type) {
-            DbType.MYSQL, DbType.POSTGRESQL ->
-                "SELECT tc.table_name, tc.constraint_name, cc.check_clause FROM information_schema.table_constraints tc " +
+        val raw = when (config.type) {
+            // Тот же приём, что и для PRIMARY KEY (см. loadAllPrimaryKeys): вместо JOIN двух I_S-
+            // представлений — два отдельных однотабличных запроса, склеенных по constraint_name уже
+            // в Kotlin. table_constraints даёт (table_name, constraint_name), check_constraints даёт
+            // (constraint_name, check_clause) — порознь каждый фильтруется по своему полю схемы
+            // напрямую и не провоцирует деградацию оптимизатора, которая наблюдалась у JOIN-варианта.
+            DbType.MYSQL -> {
+                val tableByConstraint = mutableMapOf<String, String>()
+                connection.createStatement().use { stmt ->
+                    stmt.executeQuery(
+                        "SELECT table_name, constraint_name FROM information_schema.table_constraints " +
+                            "WHERE constraint_type = 'CHECK' AND ${schemaClause()}"
+                    ).use { rs -> while (rs.next()) tableByConstraint[rs.getString("constraint_name")] = rs.getString("table_name") }
+                }
+                val result = mutableListOf<RawCheck>()
+                connection.createStatement().use { stmt ->
+                    stmt.executeQuery(
+                        "SELECT constraint_name, check_clause FROM information_schema.check_constraints " +
+                            "WHERE constraint_schema = '${config.database}'"
+                    ).use { rs ->
+                        while (rs.next()) {
+                            val constraintName = rs.getString("constraint_name")
+                            val tableName = tableByConstraint[constraintName] ?: continue
+                            result.add(RawCheck(tableName, constraintName, rs.getString("check_clause")))
+                        }
+                    }
+                }
+                result
+            }
+            DbType.POSTGRESQL -> {
+                val result = mutableListOf<RawCheck>()
+                val sql = "SELECT tc.table_name, tc.constraint_name, cc.check_clause FROM information_schema.table_constraints tc " +
                     "JOIN information_schema.check_constraints cc " +
                     "  ON tc.constraint_name = cc.constraint_name AND tc.table_schema = cc.constraint_schema " +
                     "WHERE tc.constraint_type = 'CHECK' AND ${schemaClause("tc")}"
-            DbType.SQLSERVER ->
-                "SELECT t.name AS table_name, cc.name AS constraint_name, cc.definition AS check_clause " +
+                connection.createStatement().use { stmt ->
+                    stmt.executeQuery(sql).use { rs ->
+                        while (rs.next()) result.add(RawCheck(rs.getString("table_name"), rs.getString("constraint_name"), rs.getString("check_clause")))
+                    }
+                }
+                result
+            }
+            DbType.SQLSERVER -> {
+                val result = mutableListOf<RawCheck>()
+                val sql = "SELECT t.name AS table_name, cc.name AS constraint_name, cc.definition AS check_clause " +
                     "FROM sys.check_constraints cc JOIN sys.tables t ON cc.parent_object_id = t.object_id"
+                connection.createStatement().use { stmt ->
+                    stmt.executeQuery(sql).use { rs ->
+                        while (rs.next()) result.add(RawCheck(rs.getString("table_name"), rs.getString("constraint_name"), rs.getString("check_clause")))
+                    }
+                }
+                result
+            }
             else -> return emptyMap()
         }
         // Postgres 12+ отражает обычный NOT NULL на колонке как отдельный синтетический CHECK
@@ -325,16 +384,10 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
         // валидирует при вставке), поэтому такой чек безопасно и достаточно пропустить целиком.
         val mysqlJsonValidPattern = Regex("""(?i)^json_valid\(`[\w]+`\)$""")
         val result = LinkedHashMap<String, MutableList<CheckConstraintDef>>()
-        connection.createStatement().use { stmt ->
-            stmt.executeQuery(sql).use { rs ->
-                while (rs.next()) {
-                    val clause = rs.getString("check_clause")
-                    if (notNullPattern.matches(clause.trim())) continue
-                    if (config.type == DbType.MYSQL && mysqlJsonValidPattern.matches(clause.trim())) continue
-                    result.getOrPut(rs.getString("table_name")) { mutableListOf() }
-                        .add(CheckConstraintDef(rs.getString("constraint_name"), clause))
-                }
-            }
+        for ((tableName, constraintName, clause) in raw) {
+            if (notNullPattern.matches(clause.trim())) continue
+            if (config.type == DbType.MYSQL && mysqlJsonValidPattern.matches(clause.trim())) continue
+            result.getOrPut(tableName) { mutableListOf() }.add(CheckConstraintDef(constraintName, clause))
         }
         return result
     }
