@@ -52,8 +52,12 @@ class CopyRunner {
 
                 var current = table
                 log.info("Сессия {}: таблица {} — читаю структуру из источника", sessionId, current.tableName)
+                val structureStart = System.currentTimeMillis()
                 val structure = source.getTableStructure(current.tableName)
-                log.debug("Сессия {}: таблица {} — структура получена, колонок={}", sessionId, current.tableName, structure.columns.size)
+                log.info(
+                    "Сессия {}: таблица {} — структура получена за {} мс, колонок={}",
+                    sessionId, current.tableName, System.currentTimeMillis() - structureStart, structure.columns.size,
+                )
 
                 if (needsStructure && !current.structureCopied) {
                     log.info("Сессия {}: таблица {} — создаю на приёмнике", sessionId, current.tableName)

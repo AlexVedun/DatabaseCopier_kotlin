@@ -159,24 +159,42 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
             }
         }
 
-        val primaryKey = mutableListOf<String>()
+        return TableStructure(table, columns, primaryKeyColumns(table), getIndexes(table), getCheckConstraints(table), getTableComment(table))
+    }
+
+    // Кэшируется на всю сессию (наполняется одним запросом при первом обращении), а не на таблицу —
+    // JOIN information_schema.table_constraints × key_column_usage по table_name=? реально
+    // наблюдался зависающим на МИНУТЫ на одном вызове против удалённого MySQL-сервера с большим
+    // количеством таблиц (I_S-джойны на MySQL не всегда проталкивают фильтр внутрь и могут
+    // разворачиваться в полный скан словаря); при 493 таблицах в сессии это означало бы копирование,
+    // не начинающееся вообще никогда. Один запрос без фильтра по table_name на всю схему — тот же
+    // самый JOIN, но выполняется один раз, а не N раз.
+    private var primaryKeysBySchema: Map<String, List<String>>? = null
+
+    private fun primaryKeyColumns(table: String): List<String> {
+        val cache = primaryKeysBySchema ?: loadAllPrimaryKeys().also { primaryKeysBySchema = it }
+        return cache[table] ?: emptyList()
+    }
+
+    private fun loadAllPrimaryKeys(): Map<String, List<String>> {
         // constraint_name для PRIMARY KEY в MySQL всегда буквально "PRIMARY" — одинаково для
         // всех таблиц схемы, поэтому join обязан фильтроваться ещё и по table_name, иначе
         // подхватятся PK-колонки других таблиц с тем же именем constraint.
-        val pkSql = "SELECT kcu.column_name FROM information_schema.table_constraints tc " +
+        val sql = "SELECT tc.table_name, kcu.column_name FROM information_schema.table_constraints tc " +
             "JOIN information_schema.key_column_usage kcu " +
             "  ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema " +
             "  AND tc.table_name = kcu.table_name " +
-            "WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_name = ? AND ${schemaClause("tc")} " +
-            "ORDER BY kcu.ordinal_position"
-        connection.prepareStatement(pkSql).use { ps ->
-            ps.setString(1, table)
-            ps.executeQuery().use { rs ->
-                while (rs.next()) primaryKey.add(rs.getString("column_name"))
+            "WHERE tc.constraint_type = 'PRIMARY KEY' AND ${schemaClause("tc")} " +
+            "ORDER BY tc.table_name, kcu.ordinal_position"
+        val result = LinkedHashMap<String, MutableList<String>>()
+        connection.createStatement().use { stmt ->
+            stmt.executeQuery(sql).use { rs ->
+                while (rs.next()) {
+                    result.getOrPut(rs.getString("table_name")) { mutableListOf() }.add(rs.getString("column_name"))
+                }
             }
         }
-
-        return TableStructure(table, columns, primaryKey, getIndexes(table), getCheckConstraints(table), getTableComment(table))
+        return result
     }
 
     private fun getColumnComments(table: String): Map<String, String> {
@@ -274,18 +292,26 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
         }
     }
 
+    // Тот же джойн-по-словарю паттерн, что и у PRIMARY KEY (см. loadAllPrimaryKeys) — тоже кэшируется
+    // на всю сессию одним запросом, а не по одному на таблицу.
+    private var checkConstraintsBySchema: Map<String, List<CheckConstraintDef>>? = null
+
     private fun getCheckConstraints(table: String): List<CheckConstraintDef> {
+        val cache = checkConstraintsBySchema ?: loadAllCheckConstraints().also { checkConstraintsBySchema = it }
+        return cache[table] ?: emptyList()
+    }
+
+    private fun loadAllCheckConstraints(): Map<String, List<CheckConstraintDef>> {
         val sql = when (config.type) {
             DbType.MYSQL, DbType.POSTGRESQL ->
-                "SELECT tc.constraint_name, cc.check_clause FROM information_schema.table_constraints tc " +
+                "SELECT tc.table_name, tc.constraint_name, cc.check_clause FROM information_schema.table_constraints tc " +
                     "JOIN information_schema.check_constraints cc " +
                     "  ON tc.constraint_name = cc.constraint_name AND tc.table_schema = cc.constraint_schema " +
-                    "WHERE tc.constraint_type = 'CHECK' AND tc.table_name = ? AND ${schemaClause("tc")}"
+                    "WHERE tc.constraint_type = 'CHECK' AND ${schemaClause("tc")}"
             DbType.SQLSERVER ->
-                "SELECT cc.name AS constraint_name, cc.definition AS check_clause " +
-                    "FROM sys.check_constraints cc JOIN sys.tables t ON cc.parent_object_id = t.object_id " +
-                    "WHERE t.name = ?"
-            else -> return emptyList()
+                "SELECT t.name AS table_name, cc.name AS constraint_name, cc.definition AS check_clause " +
+                    "FROM sys.check_constraints cc JOIN sys.tables t ON cc.parent_object_id = t.object_id"
+            else -> return emptyMap()
         }
         // Postgres 12+ отражает обычный NOT NULL на колонке как отдельный синтетический CHECK
         // ("col IS NOT NULL", имя вида "2200_16384_1_not_null") — это уже покрыто ColumnDef.nullable,
@@ -298,15 +324,15 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
         // Валидность JSON на target и так обеспечивается самим типом колонки (JSONB у Postgres
         // валидирует при вставке), поэтому такой чек безопасно и достаточно пропустить целиком.
         val mysqlJsonValidPattern = Regex("""(?i)^json_valid\(`[\w]+`\)$""")
-        val result = mutableListOf<CheckConstraintDef>()
-        connection.prepareStatement(sql).use { ps ->
-            ps.setString(1, table)
-            ps.executeQuery().use { rs ->
+        val result = LinkedHashMap<String, MutableList<CheckConstraintDef>>()
+        connection.createStatement().use { stmt ->
+            stmt.executeQuery(sql).use { rs ->
                 while (rs.next()) {
                     val clause = rs.getString("check_clause")
                     if (notNullPattern.matches(clause.trim())) continue
                     if (config.type == DbType.MYSQL && mysqlJsonValidPattern.matches(clause.trim())) continue
-                    result.add(CheckConstraintDef(rs.getString("constraint_name"), clause))
+                    result.getOrPut(rs.getString("table_name")) { mutableListOf() }
+                        .add(CheckConstraintDef(rs.getString("constraint_name"), clause))
                 }
             }
         }
