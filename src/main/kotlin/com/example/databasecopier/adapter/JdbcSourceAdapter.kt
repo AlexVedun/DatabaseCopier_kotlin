@@ -597,9 +597,9 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
 
         return if (pkColumn != null) {
             val pkType = structure.columns.first { it.name == pkColumn }.type
-            readBatchByPrimaryKey(table, pkColumn, pkType, cursor, batchSize)
+            readBatchByPrimaryKey(table, pkColumn, pkType, structure.columns, cursor, batchSize)
         } else {
-            readBatchByOffset(table, cursor, batchSize)
+            readBatchByOffset(table, structure.columns, cursor, batchSize)
         }
     }
 
@@ -607,6 +607,7 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
         table: String,
         pkColumn: String,
         pkType: LogicalType,
+        columns: List<ColumnDef>,
         cursor: JsonElement?,
         batchSize: Int,
     ): BatchResult {
@@ -645,10 +646,11 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
                 }
             }
             ps.setInt(idx, batchSize)
+            val columnsByName = columns.associateBy { it.name }
             ps.executeQuery().use { rs ->
                 val meta = rs.metaData
                 while (rs.next()) {
-                    rows.add(rowToMap(rs, meta))
+                    rows.add(rowToMap(rs, meta, columnsByName))
                     lastPk = rs.getObject(pkColumn)
                 }
             }
@@ -667,7 +669,7 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
         return BatchResult(rows, nextCursor)
     }
 
-    private fun readBatchByOffset(table: String, cursor: JsonElement?, batchSize: Int): BatchResult {
+    private fun readBatchByOffset(table: String, columns: List<ColumnDef>, cursor: JsonElement?, batchSize: Int): BatchResult {
         val offset = cursor?.let { (it as? kotlinx.serialization.json.JsonObject)?.get("value")?.jsonPrimitive?.content?.toLong() } ?: 0L
         // Без PK нет естественного столбца для ORDER BY — но MSSQL требует ORDER BY для
         // OFFSET/FETCH синтаксически, поэтому используем заведомо "пустую" сортировку.
@@ -686,9 +688,10 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
                 ps.setInt(1, batchSize)
                 ps.setLong(2, offset)
             }
+            val columnsByName = columns.associateBy { it.name }
             ps.executeQuery().use { rs ->
                 val meta = rs.metaData
-                while (rs.next()) rows.add(rowToMap(rs, meta))
+                while (rs.next()) rows.add(rowToMap(rs, meta, columnsByName))
             }
         }
 
@@ -704,10 +707,33 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
         return BatchResult(rows, nextCursor)
     }
 
-    private fun rowToMap(rs: ResultSet, meta: java.sql.ResultSetMetaData): Map<String, Any?> {
+    // MySQL допускает "нулевые" даты ("0000-00-00"/"0000-00-00 00:00:00") в DATE/DATETIME/TIMESTAMP
+    // без реального календарного значения. С zeroDateTimeBehavior=CONVERT_TO_NULL (см. JdbcUrl.kt)
+    // драйвер отдаёт для них NULL вместо падения при чтении — но если колонка объявлена NOT NULL
+    // (частый в legacy-схемах паттерн, где 0000-00-00 использовался как "нет значения" вместо NULL),
+    // такой NULL нарушит NOT NULL при вставке на любом target. Раз колонка NOT NULL, любой NULL,
+    // прочитанный из неё, ГАРАНТИРОВАННО пришёл именно из такой нулевой даты (иначе БД сама не дала
+    // бы её туда записать) — поэтому его безопасно заменить на фиксированный "нет реальной даты"
+    // плейсхолдер (эпоха, 1970-01-01), а не потерять всю строку или уронить копирование.
+    private val EPOCH_DATE: java.sql.Date = java.sql.Date.valueOf("1970-01-01")
+    private val EPOCH_DATETIME: java.sql.Timestamp = java.sql.Timestamp.valueOf("1970-01-01 00:00:00")
+
+    private fun rowToMap(rs: ResultSet, meta: java.sql.ResultSetMetaData, columnsByName: Map<String, ColumnDef>): Map<String, Any?> {
         val map = LinkedHashMap<String, Any?>()
         for (i in 1..meta.columnCount) {
-            map[meta.getColumnName(i)] = rs.getObject(i)
+            val name = meta.getColumnName(i)
+            var value = rs.getObject(i)
+            if (value == null && config.type == DbType.MYSQL) {
+                val col = columnsByName[name]
+                if (col != null && !col.nullable) {
+                    value = when (col.type) {
+                        LogicalType.DATE -> EPOCH_DATE
+                        LogicalType.DATETIME -> EPOCH_DATETIME
+                        else -> null
+                    }
+                }
+            }
+            map[name] = value
         }
         return map
     }

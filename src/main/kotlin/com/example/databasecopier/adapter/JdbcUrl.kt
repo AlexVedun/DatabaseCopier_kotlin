@@ -15,8 +15,15 @@ private const val CONNECT_TIMEOUT_SECONDS = 15
 private const val SOCKET_TIMEOUT_SECONDS = 600
 
 fun buildJdbcUrl(config: ConnectionConfig): String = when (config.type) {
+    // MySQL допускает "нулевые" даты ("0000-00-00", "0000-00-00 00:00:00") в DATE/DATETIME/
+    // TIMESTAMP-колонках, если не включён строгий режим NO_ZERO_DATE — у них нет реального
+    // календарного значения. По умолчанию mysql-connector-j (zeroDateTimeBehavior=EXCEPTION)
+    // отказывается конвертировать такое значение в java.sql.Date/Timestamp и падает с "Zero date
+    // value prohibited" прямо при чтении строки. CONVERT_TO_NULL — штатный режим драйвера для этого
+    // случая: такая дата читается как NULL, а не роняет копирование всей таблицы.
     DbType.MYSQL -> "jdbc:mysql://${config.host}:${config.port}/${config.database}" +
-        "?connectTimeout=${CONNECT_TIMEOUT_SECONDS * 1000}&socketTimeout=${SOCKET_TIMEOUT_SECONDS * 1000}"
+        "?connectTimeout=${CONNECT_TIMEOUT_SECONDS * 1000}&socketTimeout=${SOCKET_TIMEOUT_SECONDS * 1000}" +
+        "&zeroDateTimeBehavior=CONVERT_TO_NULL"
     DbType.POSTGRESQL -> "jdbc:postgresql://${config.host}:${config.port}/${config.database}" +
         "?connectTimeout=$CONNECT_TIMEOUT_SECONDS&socketTimeout=$SOCKET_TIMEOUT_SECONDS"
     // trustServerCertificate=true — большинство локальных/внутренних MSSQL-инсталляций используют
