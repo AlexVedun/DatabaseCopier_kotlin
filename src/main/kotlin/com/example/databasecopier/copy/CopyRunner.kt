@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import org.slf4j.LoggerFactory
 
 /**
  * Фоновый процесс копирования выбранных таблиц сессии. Не привязан к жизни конкретного окна —
@@ -22,6 +23,8 @@ import kotlinx.serialization.json.JsonElement
  */
 class CopyRunner {
 
+    private val log = LoggerFactory.getLogger(CopyRunner::class.java)
+
     private val _progress = MutableSharedFlow<CopyProgressEvent>(extraBufferCapacity = 64)
     val progress: SharedFlow<CopyProgressEvent> = _progress.asSharedFlow()
 
@@ -30,21 +33,30 @@ class CopyRunner {
         val needsStructure = true // оба режима (structure_only/structure_and_data) копируют структуру
         val needsData = session.copyMode == "structure_and_data"
 
+        log.info("Сессия {}: старт, таблиц выбрано={}, needsData={}", sessionId, CopySessionRepository.getTables(sessionId).count { it.isSelected }, needsData)
         try {
             val allSelected = CopySessionRepository.getTables(sessionId).filter { it.isSelected }
             val pending = allSelected.filter { it.status != "done" && it.status != "skipped" }
+            log.info("Сессия {}: к копированию осталось {} из {} таблиц", sessionId, pending.size, allSelected.size)
 
             // FK-проверки отключаются на весь оставшийся ход сессии (переживает паузу/возобновление —
             // включаются обратно только по успешном завершении всей сессии, см. Шаг 4/9 инструкции).
+            log.debug("Сессия {}: отключаю проверку внешних ключей на приёмнике", sessionId)
             target.disableForeignKeyChecks()
 
             for (table in pending) {
-                if (!isRunnable(sessionId)) return@withContext
+                if (!isRunnable(sessionId)) {
+                    log.info("Сессия {}: остановлена (пауза/отмена) перед таблицей {}", sessionId, table.tableName)
+                    return@withContext
+                }
 
                 var current = table
+                log.info("Сессия {}: таблица {} — читаю структуру из источника", sessionId, current.tableName)
                 val structure = source.getTableStructure(current.tableName)
+                log.debug("Сессия {}: таблица {} — структура получена, колонок={}", sessionId, current.tableName, structure.columns.size)
 
                 if (needsStructure && !current.structureCopied) {
+                    log.info("Сессия {}: таблица {} — создаю на приёмнике", sessionId, current.tableName)
                     target.createTable(structure)
                     CopySessionRepository.markStructureCopied(current.id)
                     current = current.copy(structureCopied = true)
@@ -65,28 +77,36 @@ class CopyRunner {
                 // Индексы/CHECK создаются после загрузки данных (быстрее, чем поддерживать индекс
                 // при каждой вставке батча) — для structure_only режима данных нет, создаются сразу.
                 if (!current.indexesCopied) {
+                    log.info("Сессия {}: таблица {} — создаю индексы/CHECK-констрейнты", sessionId, current.tableName)
                     target.createIndexesAndConstraints(structure)
                     CopySessionRepository.markIndexesCopied(current.id)
                     current = current.copy(indexesCopied = true)
                 }
 
                 CopySessionRepository.updateTableStatus(current.id, "done")
+                log.info("Сессия {}: таблица {} — готово", sessionId, current.tableName)
                 emit(sessionId, current.copy(status = "done"))
             }
 
             // FK создаются отдельным проходом ПОСЛЕ того, как все выбранные таблицы гарантированно
             // существуют на target (иначе REFERENCES на ещё не созданную таблицу упадёт).
+            log.info("Сессия {}: прохожу внешние ключи для {} таблиц", sessionId, allSelected.size)
             val selectedNames = allSelected.map { it.tableName }.toSet()
             for (table in allSelected.filter { !it.foreignKeysCopied }) {
-                if (!isRunnable(sessionId)) return@withContext
+                if (!isRunnable(sessionId)) {
+                    log.info("Сессия {}: остановлена перед внешними ключами таблицы {}", sessionId, table.tableName)
+                    return@withContext
+                }
 
                 val foreignKeys = source.getForeignKeys(table.tableName)
                     .filter { it.referencedTable in selectedNames }
+                log.debug("Сессия {}: таблица {} — внешних ключей={}", sessionId, table.tableName, foreignKeys.size)
                 target.createForeignKeys(table.tableName, foreignKeys)
                 CopySessionRepository.markForeignKeysCopied(table.id)
             }
 
             target.enableForeignKeyChecks()
+            log.info("Сессия {}: внешние ключи и представления — переход к вьюхам", sessionId)
 
             // Views создаются последним проходом, когда все выбранные таблицы (со структурой,
             // данными, FK и индексами) уже существуют на target. Между разными диалектами тело
@@ -94,18 +114,24 @@ class CopyRunner {
             // диалекта просто пробуем создать и, если СУБД отвергла синтаксис, помечаем view как
             // требующую ручной адаптации, не прерывая копирование остальных объектов сессии.
             for (view in CopySessionRepository.getViews(sessionId).filter { it.isSelected && it.status == "pending" }) {
-                if (!isRunnable(sessionId)) return@withContext
+                if (!isRunnable(sessionId)) {
+                    log.info("Сессия {}: остановлена перед вьюхой {}", sessionId, view.viewName)
+                    return@withContext
+                }
                 try {
                     val definition = source.getViewDefinition(view.viewName)
                     target.createView(view.viewName, definition)
                     CopySessionRepository.updateViewStatus(view.id, "done")
                 } catch (e: Exception) {
+                    log.warn("Сессия {}: вьюха {} требует ручной адаптации — {}", sessionId, view.viewName, e.message)
                     CopySessionRepository.updateViewStatus(view.id, "manual_adaptation_required")
                 }
             }
 
             CopySessionRepository.updateSessionStatus(sessionId, "completed")
+            log.info("Сессия {}: завершена успешно", sessionId)
         } catch (e: Exception) {
+            log.error("Сессия {}: упала с ошибкой", sessionId, e)
             CopySessionRepository.updateSessionStatus(sessionId, "failed", lastError = e.message)
         }
     }
@@ -120,6 +146,7 @@ class CopyRunner {
         autoIncrementColumn: String?,
     ): CopySessionTableRecord? {
         var current = initial
+        log.info("Сессия {}: таблица {} — начинаю копирование данных (batchSize={}, уже скопировано строк={})", sessionId, current.tableName, batchSize, current.rowsCopied)
         CopySessionRepository.updateTableStatus(current.id, "in_progress")
         current = current.copy(status = "in_progress")
         emit(sessionId, current)
@@ -128,9 +155,13 @@ class CopyRunner {
         var maxAutoIncrementValue: Long? = null
 
         while (true) {
-            if (!isRunnable(sessionId)) return null
+            if (!isRunnable(sessionId)) {
+                log.info("Сессия {}: таблица {} — остановлена (пауза/отмена) на {} скопированных строках", sessionId, current.tableName, current.rowsCopied)
+                return null
+            }
 
             val batch = source.readBatch(current.tableName, cursor, batchSize)
+            log.debug("Сессия {}: таблица {} — прочитан батч из источника, строк={}", sessionId, current.tableName, batch.rows.size)
             if (batch.rows.isNotEmpty()) {
                 target.insertBatch(current.tableName, batch.rows)
                 if (autoIncrementColumn != null) {
@@ -154,6 +185,7 @@ class CopyRunner {
         // Синхронизация счётчика — только после того, как ВСЕ строки таблицы скопированы (не на
         // каждом батче), иначе новые строки, вставленные в target вручную между батчами, рискуют
         // получить PK, конфликтующий с ещё не скопированными строками источника.
+        log.info("Сессия {}: таблица {} — данные скопированы полностью, всего строк={}", sessionId, current.tableName, current.rowsCopied)
         if (autoIncrementColumn != null && maxAutoIncrementValue != null) {
             target.syncAutoIncrement(current.tableName, autoIncrementColumn, maxAutoIncrementValue!!)
         }

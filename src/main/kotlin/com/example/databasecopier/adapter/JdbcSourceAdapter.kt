@@ -4,6 +4,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import org.slf4j.LoggerFactory
 import java.sql.Connection
 import java.sql.DriverManager
 import java.sql.ResultSet
@@ -11,6 +12,7 @@ import java.sql.ResultSet
 class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
 
     companion object {
+        private val log = LoggerFactory.getLogger(JdbcSourceAdapter::class.java)
         // SQLite не хранит длину отдельно от объявленного типа (PRAGMA table_info возвращает
         // её как часть строки, например "VARCHAR(100)") — извлекаем тем же способом, что и для
         // дампов, см. CreateTableParser.
@@ -20,7 +22,15 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
     private lateinit var connection: Connection
 
     override fun connect() {
-        connection = DriverManager.getConnection(buildJdbcUrl(config), config.username, config.password)
+        log.info("Источник {} ({}:{}/{}) — подключаюсь", config.type, config.host, config.port, config.database)
+        val start = System.currentTimeMillis()
+        try {
+            connection = DriverManager.getConnection(buildJdbcUrl(config), config.username, config.password)
+            log.info("Источник {} ({}:{}/{}) — подключено за {} мс", config.type, config.host, config.port, config.database, System.currentTimeMillis() - start)
+        } catch (e: Exception) {
+            log.error("Источник {} ({}:{}/{}) — подключение не удалось за {} мс: {}", config.type, config.host, config.port, config.database, System.currentTimeMillis() - start, e.message)
+            throw e
+        }
     }
 
     override fun listTables(): Map<String, Long?> {

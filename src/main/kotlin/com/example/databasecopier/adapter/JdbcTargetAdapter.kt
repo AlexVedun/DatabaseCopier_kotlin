@@ -1,5 +1,6 @@
 package com.example.databasecopier.adapter
 
+import org.slf4j.LoggerFactory
 import java.sql.Connection
 import java.sql.DriverManager
 import java.sql.SQLException
@@ -8,11 +9,21 @@ import java.security.MessageDigest
 
 class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
 
+    private val log = LoggerFactory.getLogger(JdbcTargetAdapter::class.java)
+
     private lateinit var connection: Connection
 
     override fun connect() {
-        connection = DriverManager.getConnection(buildJdbcUrl(config), config.username, config.password)
-        connection.autoCommit = false
+        log.info("Приёмник {} ({}:{}/{}) — подключаюсь", config.type, config.host, config.port, config.database)
+        val start = System.currentTimeMillis()
+        try {
+            connection = DriverManager.getConnection(buildJdbcUrl(config), config.username, config.password)
+            connection.autoCommit = false
+            log.info("Приёмник {} ({}:{}/{}) — подключено за {} мс", config.type, config.host, config.port, config.database, System.currentTimeMillis() - start)
+        } catch (e: Exception) {
+            log.error("Приёмник {} ({}:{}/{}) — подключение не удалось за {} мс: {}", config.type, config.host, config.port, config.database, System.currentTimeMillis() - start, e.message)
+            throw e
+        }
     }
 
     override fun createTable(structure: TableStructure) {

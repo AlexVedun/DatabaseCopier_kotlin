@@ -37,5 +37,8 @@ class DatabaseCopierApp : Application() {
 }
 
 fun main(args: Array<String>) {
+    // Должно быть выставлено до первого обращения к SLF4J/logback где бы то ни было (включая
+    // JDBC-драйверы) — конфигурация логгера читает эту system property один раз при инициализации.
+    System.setProperty("APP_LOG_DIR", getAppDataDir().resolve("logs").absolutePath)
     Application.launch(DatabaseCopierApp::class.java, *args)
 }

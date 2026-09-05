@@ -182,9 +182,18 @@ class ProgressPanelController(
         AppScope.scope.launch {
             val targetAdapter = JdbcTargetAdapter(targetConfig)
             try {
+                withContext(Dispatchers.Main) { overallLabel.text = "Подключение к источнику..." }
                 sourceAdapter.connect()
+                withContext(Dispatchers.Main) { overallLabel.text = "Подключение к приёмнику..." }
                 targetAdapter.connect()
+                withContext(Dispatchers.Main) { overallLabel.text = "Копирование: 0 из $totalTables таблиц" }
                 runner.run(id, sourceAdapter, targetAdapter)
+            } catch (e: Exception) {
+                // connect() выполняется здесь, а не внутри CopyRunner.run — без этого catch сбой
+                // подключения (например, недоступный удалённый сервер) улетал бы необработанным
+                // исключением из корутины, сессия навсегда оставалась бы в статусе "running", а UI —
+                // висел с "Подключение..." без единой подсказки, что пошло не так.
+                CopySessionRepository.updateSessionStatus(id, "failed", lastError = e.message)
             } finally {
                 sourceAdapter.close()
                 targetAdapter.close()
