@@ -15,6 +15,11 @@ object TypeMapper {
                 t == "date" -> LogicalType.DATE
                 t.startsWith("datetime") || t.startsWith("timestamp") -> LogicalType.DATETIME
                 t == "json" -> LogicalType.JSON
+                // *blob (tiny/medium/long) и binary/varbinary — произвольные байты, а не строка в
+                // кодировке соединения. Раньше попадали в ветку else -> TEXT и создавались на target
+                // как LONGTEXT: вставка бинарных данных (например PNG-иконки) в текстовую колонку
+                // падала с "Incorrect string value" (\x89PNG... не является валидной utf8mb4-строкой).
+                t.endsWith("blob") || t.startsWith("binary") || t.startsWith("varbinary") -> LogicalType.BLOB
                 else -> LogicalType.TEXT
             }
             DbType.POSTGRESQL -> when {
@@ -28,6 +33,7 @@ object TypeMapper {
                 t.startsWith("timestamp") -> LogicalType.DATETIME
                 t == "json" || t == "jsonb" -> LogicalType.JSON
                 t == "uuid" -> LogicalType.UUID
+                t == "bytea" -> LogicalType.BLOB
                 else -> LogicalType.TEXT
             }
             DbType.SQLITE -> when {
@@ -36,6 +42,7 @@ object TypeMapper {
                 // "type affinity", что использует сам SQLite, вместо точного соответствия.
                 t.isBlank() -> LogicalType.TEXT
                 t.contains("bool") -> LogicalType.BOOLEAN
+                t.contains("blob") -> LogicalType.BLOB
                 t.contains("int") -> LogicalType.INTEGER
                 t.contains("char") || t.contains("clob") -> LogicalType.VARCHAR
                 t.contains("text") -> LogicalType.TEXT
@@ -57,6 +64,7 @@ object TypeMapper {
                 t == "date" -> LogicalType.DATE
                 t.startsWith("datetime") || t == "smalldatetime" -> LogicalType.DATETIME
                 t == "uniqueidentifier" -> LogicalType.UUID
+                t == "binary" || t == "varbinary" || t == "image" -> LogicalType.BLOB
                 else -> LogicalType.TEXT
             }
         }
@@ -82,6 +90,7 @@ object TypeMapper {
             LogicalType.DATETIME -> "DATETIME"
             LogicalType.JSON -> "JSON"
             LogicalType.UUID -> "VARCHAR(36)"
+            LogicalType.BLOB -> "LONGBLOB"
         }
         DbType.POSTGRESQL -> when (type) {
             LogicalType.INTEGER -> "INTEGER"
@@ -94,6 +103,7 @@ object TypeMapper {
             LogicalType.DATETIME -> "TIMESTAMP"
             LogicalType.JSON -> "JSONB"
             LogicalType.UUID -> "UUID"
+            LogicalType.BLOB -> "BYTEA"
         }
         DbType.SQLITE -> when (type) {
             LogicalType.INTEGER, LogicalType.BIGINT -> "INTEGER"
@@ -101,6 +111,7 @@ object TypeMapper {
             LogicalType.VARCHAR, LogicalType.TEXT, LogicalType.DATE, LogicalType.DATETIME,
             LogicalType.JSON, LogicalType.UUID -> "TEXT"
             LogicalType.DECIMAL -> "NUMERIC"
+            LogicalType.BLOB -> "BLOB"
         }
         DbType.SQLSERVER -> when (type) {
             LogicalType.INTEGER -> "INT"
@@ -118,6 +129,7 @@ object TypeMapper {
             LogicalType.DATETIME -> "DATETIME2"
             LogicalType.JSON -> "NVARCHAR(MAX)" // у MSSQL нет отдельного JSON-типа
             LogicalType.UUID -> "UNIQUEIDENTIFIER"
+            LogicalType.BLOB -> "VARBINARY(MAX)"
         }
     }
 }

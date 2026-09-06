@@ -13,7 +13,7 @@ data class ConnectionConfig(
     val password: String? = null,
 )
 
-enum class LogicalType { INTEGER, BIGINT, VARCHAR, TEXT, DECIMAL, BOOLEAN, DATE, DATETIME, JSON, UUID }
+enum class LogicalType { INTEGER, BIGINT, VARCHAR, TEXT, DECIMAL, BOOLEAN, DATE, DATETIME, JSON, UUID, BLOB }
 
 data class ColumnDef(
     val name: String,
