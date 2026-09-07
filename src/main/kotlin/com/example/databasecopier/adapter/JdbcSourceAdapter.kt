@@ -8,6 +8,7 @@ import org.slf4j.LoggerFactory
 import java.sql.Connection
 import java.sql.DriverManager
 import java.sql.ResultSet
+import java.sql.SQLException
 
 class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
 
@@ -33,7 +34,42 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
         }
     }
 
-    override fun listTables(): Map<String, Long?> {
+    // Некоторые источники (в частности удалённый shared-хостинг MySQL, см. историю коммита) молча
+    // роняют простаивающее соединение — например, пока на приёмнике долго строится индекс/FK для
+    // ДРУГИХ таблиц (source в это время не используется). Причём это не всегда чистое закрытие с
+    // FIN/RST: если соединение обрывает промежуточный firewall/NAT (частый случай на shared-хостинге),
+    // ни один из концов об этом не узнаёт — connection.isValid() в таком случае ничего не замечает
+    // (сокет с точки зрения клиента выглядит совершенно живым), и падает уже РЕАЛЬНЫЙ запрос, причём
+    // не через 5 секунд, а только через полный socketTimeout. Поэтому вместо (ненадёжной здесь)
+    // проверки connection.isValid() ДО запроса — перехватываем настоящую ошибку связи ПОСЛЕ запроса
+    // и повторяем его один раз на свежем соединении; это работает независимо от того, как именно
+    // соединение умерло.
+    private inline fun <T> withConnectionRetry(operation: () -> T): T {
+        return try {
+            operation()
+        } catch (e: SQLException) {
+            if (!looksLikeConnectionFailure(e)) throw e
+            log.warn("Источник {} ({}:{}/{}) — соединение разорвано ({}), переподключаюсь и повторяю запрос", config.type, config.host, config.port, config.database, e.message)
+            connect()
+            operation()
+        }
+    }
+
+    // SQLState класса "08" ("connection exception") — портируемый между драйверами признак именно
+    // сетевой/соединенческой ошибки, а не ошибки в самом SQL. Дополнительно сверяемся с текстом
+    // сообщения на случай, если конкретный драйвер не проставил sqlState как положено (так и
+    // оказалось у mysql-connector-j для "Communications link failure").
+    private fun looksLikeConnectionFailure(e: SQLException): Boolean {
+        if (e.sqlState?.startsWith("08") == true) return true
+        val msg = e.message?.lowercase() ?: ""
+        return "communications link failure" in msg ||
+            "connection reset" in msg ||
+            "broken pipe" in msg ||
+            "connection is closed" in msg ||
+            "connection has been closed" in msg
+    }
+
+    override fun listTables(): Map<String, Long?> = withConnectionRetry {
         val sql = if (config.type == DbType.SQLITE) {
             "SELECT name AS table_name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'"
         } else {
@@ -51,7 +87,7 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
         return result
     }
 
-    override fun listViews(): List<String> {
+    override fun listViews(): List<String> = withConnectionRetry {
         val sql = if (config.type == DbType.SQLITE) {
             "SELECT name FROM sqlite_master WHERE type = 'view'"
         } else {
@@ -61,10 +97,10 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
         connection.createStatement().use { stmt ->
             stmt.executeQuery(sql).use { rs -> while (rs.next()) result.add(rs.getString("name")) }
         }
-        return result
+        return@withConnectionRetry result
     }
 
-    override fun getViewDefinition(view: String): String {
+    override fun getViewDefinition(view: String): String = withConnectionRetry {
         val raw = when (config.type) {
             DbType.SQLITE ->
                 connection.prepareStatement("SELECT sql FROM sqlite_master WHERE type = 'view' AND name = ?").use { ps ->
@@ -102,8 +138,8 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
         return raw.substring(selectIdx).trim().trimEnd(';')
     }
 
-    override fun getTableStructure(table: String): TableStructure {
-        if (config.type == DbType.SQLITE) return getSqliteTableStructure(table)
+    override fun getTableStructure(table: String): TableStructure = withConnectionRetry {
+        if (config.type == DbType.SQLITE) return@withConnectionRetry getSqliteTableStructure(table)
 
         val identityColumns = if (config.type == DbType.SQLSERVER) readMssqlIdentityColumns(table) else emptySet()
         val columnComments = getColumnComments(table)
@@ -474,7 +510,7 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
         return result
     }
 
-    override fun getForeignKeys(table: String): List<ForeignKeyRef> {
+    override fun getForeignKeys(table: String): List<ForeignKeyRef> = withConnectionRetry {
         if (config.type == DbType.SQLITE) {
             val result = mutableListOf<ForeignKeyRef>()
             connection.createStatement().use { stmt ->
@@ -591,11 +627,11 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
         }
     }
 
-    override fun readBatch(table: String, cursor: JsonElement?, batchSize: Int): BatchResult {
+    override fun readBatch(table: String, cursor: JsonElement?, batchSize: Int): BatchResult = withConnectionRetry {
         val structure = getTableStructure(table)
         val pkColumn = structure.primaryKey.firstOrNull()
 
-        return if (pkColumn != null) {
+        if (pkColumn != null) {
             val pkType = structure.columns.first { it.name == pkColumn }.type
             readBatchByPrimaryKey(table, pkColumn, pkType, structure.columns, cursor, batchSize)
         } else {
