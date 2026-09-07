@@ -420,10 +420,14 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
             (config.type == DbType.MYSQL && "duplicate" in msg && "name" in msg) // MySQL: Duplicate <...> name 'x'
     }
 
+    // T-SQL не знает ключевого слова RESTRICT в ON DELETE/ON UPDATE (падает с "Incorrect syntax
+    // near the keyword 'RESTRICT'") — там допустимы только NO ACTION/CASCADE/SET NULL/SET DEFAULT.
+    // По смыслу RESTRICT и NO ACTION эквивалентны (оба блокируют операцию при наличии ссылающихся
+    // строк), поэтому на MSSQL RESTRICT безопасно маппится в NO ACTION вместо падения.
     private fun actionSql(action: ReferentialAction): String = when (action) {
         ReferentialAction.CASCADE -> "CASCADE"
         ReferentialAction.SET_NULL -> "SET NULL"
-        ReferentialAction.RESTRICT -> "RESTRICT"
+        ReferentialAction.RESTRICT -> if (config.type == DbType.SQLSERVER) "NO ACTION" else "RESTRICT"
         ReferentialAction.SET_DEFAULT -> "SET DEFAULT"
         ReferentialAction.NO_ACTION -> "NO ACTION"
     }
