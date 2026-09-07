@@ -379,9 +379,27 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
     // is aborted" до явного ROLLBACK. SAVEPOINT перед каждым statement'ом (см. вызовы выше) даёт
     // откатиться только до него; для MySQL/SQLite/MSSQL savepoint не используется — MySQL делает
     // implicit commit на каждом DDL, который сам уничтожает savepoint раньше releaseSavepoint().
+    //
+    // Важно не путать коллизию ИМЕНИ объекта ("уже существует индекс/constraint с таким именем")
+    // с нарушением УНИКАЛЬНОСТИ ДАННЫХ при создании UNIQUE-индекса на таблице, где значения на
+    // самом деле повторяются ("Cannot insert duplicate key row ...", "Duplicate entry '...' for
+    // key ...", "duplicate key value violates unique constraint"). Оба класса ошибок у разных
+    // СУБД содержат слово "duplicate", поэтому раньше здесь была проверка `"duplicate" in msg`,
+    // которая ложно принимала нарушение уникальности данных за коллизию имён — вызывался
+    // бесполезный поиск владельца по sys.indexes/information_schema (ничего не находил) и
+    // пользователю показывалось неверное сообщение "два разных объекта с одинаковым именем"
+    // вместо настоящей причины (дублирующиеся значения в данных). Ниже — только формулировки,
+    // однозначно означающие именно коллизию ИМЕНИ, а не дублирование данных.
     private fun looksLikeDuplicate(e: SQLException): Boolean {
         val msg = e.message?.lowercase() ?: ""
-        return "duplicate" in msg || "already exists" in msg || "there is already an object" in msg
+        // MySQL формулирует коллизию имени как "Duplicate <тип объекта> name 'x'" (key name,
+        // foreign key constraint name, check constraint name, ...) — всегда со словом "name".
+        // Нарушение уникальности данных формулируется иначе: "Duplicate entry 'значение' for
+        // key 'x'" — без слова "name", поэтому пара "duplicate" && "name" отличает их надёжно,
+        // не перечисляя вручную все конкретные типы объектов.
+        return "already exists" in msg || // Postgres/SQLite: relation/index "x" already exists
+            "there is already an object" in msg || // MSSQL: There is already an object named 'x'
+            ("duplicate" in msg && "name" in msg) // MySQL: Duplicate <...> name 'x'
     }
 
     private fun actionSql(action: ReferentialAction): String = when (action) {
