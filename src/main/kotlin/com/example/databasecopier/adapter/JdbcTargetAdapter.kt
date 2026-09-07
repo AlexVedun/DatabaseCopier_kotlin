@@ -199,6 +199,7 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
     }
 
     override fun createIndexesAndConstraints(structure: TableStructure) {
+        val columnsByName = structure.columns.associateBy { it.name }
         connection.createStatement().use { stmt ->
             for (idx in structure.indexes) {
                 // FULLTEXT/SPATIAL не поддерживаются вне MySQL/MariaDB в том же синтаксисе (Postgres
@@ -217,9 +218,23 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
                 // (в Postgres/MSSQL имена индексов схемо-уникальны), это реальная проблема данных
                 // источника и должна быть видна пользователю, а не молча замаскирована префиксом.
                 val name = safeIdentifier(idx.name)
+                // MySQL/Postgres/SQLite разрешают сколько угодно NULL в UNIQUE-колонке (NULL не
+                // равен NULL для проверки уникальности) — MSSQL, наоборот, считает несколько NULL
+                // дубликатом и обычный CREATE UNIQUE INDEX падает с "duplicate key ... value is
+                // (<NULL>)" на любой таблице, где такая колонка не заполнена хотя бы дважды. Чтобы
+                // воспроизвести исходную семантику, а не терять данные и не падать, для MSSQL
+                // уникальный индекс по nullable-колонкам создаётся как filtered index (WHERE col
+                // IS NOT NULL) — уникальность проверяется только среди заполненных строк, как и на
+                // остальных диалектах.
+                val nullableCols = idx.columns.filter { columnsByName[it]?.nullable == true }
+                val whereSql = if (config.type == DbType.SQLSERVER && idx.unique && nullableCols.isNotEmpty()) {
+                    " WHERE " + nullableCols.joinToString(" AND ") { "${quote(it)} IS NOT NULL" }
+                } else {
+                    ""
+                }
                 executeCreateOrDetectCollision(
                     stmt,
-                    "CREATE ${keywordSql}INDEX ${quote(name)} ON ${quote(structure.name)} ($cols)",
+                    "CREATE ${keywordSql}INDEX ${quote(name)} ON ${quote(structure.name)} ($cols)$whereSql",
                     objectLabel = "Индекс",
                     objectName = name,
                     ownerTable = structure.name,
@@ -392,14 +407,17 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
     // однозначно означающие именно коллизию ИМЕНИ, а не дублирование данных.
     private fun looksLikeDuplicate(e: SQLException): Boolean {
         val msg = e.message?.lowercase() ?: ""
-        // MySQL формулирует коллизию имени как "Duplicate <тип объекта> name 'x'" (key name,
-        // foreign key constraint name, check constraint name, ...) — всегда со словом "name".
-        // Нарушение уникальности данных формулируется иначе: "Duplicate entry 'значение' for
-        // key 'x'" — без слова "name", поэтому пара "duplicate" && "name" отличает их надёжно,
-        // не перечисляя вручную все конкретные типы объектов.
+        // MSSQL формулирует нарушение уникальности данных как "... duplicate key was found for
+        // the object name 'x' and the index name 'y'. The duplicate key value is (...)" — это
+        // сообщение тоже содержит и "duplicate", и "name" одновременно (упоминает "object name"/
+        // "index name"), поэтому общая пара "duplicate" && "name" не годится как кросс-диалектная
+        // проверка — она однозначно отличает коллизию имени от дублирования данных только для
+        // MySQL (там нарушение уникальности данных звучит как "Duplicate entry 'значение' for
+        // key 'x'" — без слова "name"). Для MSSQL коллизия имени распознаётся отдельно, по
+        // единственной однозначной фразе "there is already an object named".
         return "already exists" in msg || // Postgres/SQLite: relation/index "x" already exists
             "there is already an object" in msg || // MSSQL: There is already an object named 'x'
-            ("duplicate" in msg && "name" in msg) // MySQL: Duplicate <...> name 'x'
+            (config.type == DbType.MYSQL && "duplicate" in msg && "name" in msg) // MySQL: Duplicate <...> name 'x'
     }
 
     private fun actionSql(action: ReferentialAction): String = when (action) {
