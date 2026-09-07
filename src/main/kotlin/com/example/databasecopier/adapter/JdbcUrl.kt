@@ -29,8 +29,19 @@ fun buildJdbcUrl(config: ConnectionConfig): String = when (config.type) {
     // trustServerCertificate=true — большинство локальных/внутренних MSSQL-инсталляций используют
     // самоподписанный сертификат; encrypt=true оставляет соединение зашифрованным, но не проверяет
     // цепочку доверия сертификата (иначе современный mssql-jdbc отказывается подключаться).
+    //
+    // loginTimeout здесь НАМЕРЕННО равен SOCKET_TIMEOUT_SECONDS, а не CONNECT_TIMEOUT_SECONDS —
+    // экспериментально подтверждено (см. историю коммита), что в mssql-jdbc 12.6.1 именно
+    // loginTimeout, а не socketTimeout, реально ограничивает ожидание ответа на ЛЮБОЙ statement,
+    // а не только сам логин: запрос к уже установленному соединению, специально рассчитанный на
+    // 20 секунд (WAITFOR DELAY), падал с "Read timed out" примерно через 15 секунд при
+    // loginTimeout=15 — при том же socketTimeout=600000 — и завершался успешно при loginTimeout=60.
+    // Реальный кейс — CREATE UNIQUE INDEX на таблице в 13.4 млн строк, упавший с той же ошибкой
+    // через ~15 секунд вместо ожидаемых до 10 минут. socketTimeout всё равно оставлен как более
+    // строгая по семантике заявленная защита (см. выше) — на случай если в будущей версии
+    // драйвера баг поправят и timeout снова станет тем, что описан в документации.
     DbType.SQLSERVER -> "jdbc:sqlserver://${config.host}:${config.port};databaseName=${config.database}" +
-        ";encrypt=true;trustServerCertificate=true;loginTimeout=$CONNECT_TIMEOUT_SECONDS" +
+        ";encrypt=true;trustServerCertificate=true;loginTimeout=$SOCKET_TIMEOUT_SECONDS" +
         ";socketTimeout=${SOCKET_TIMEOUT_SECONDS * 1000}"
     DbType.SQLITE -> "jdbc:sqlite:${config.database}"
 }
