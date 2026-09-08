@@ -223,9 +223,14 @@ class ProgressPanelController(
         overallProgressBar.progress = if (totalTables > 0) done.toDouble() / totalTables else 0.0
         tableLabel.text = "${event.tableName}: ${event.rowsCopied}" +
             (event.rowsTotal?.let { " из $it" } ?: " строк")
+        // progress = -1.0 (JavaFX "indeterminate") рисуется как непрерывно бегающая туда-сюда
+        // анимированная полоска — из-за постоянной перерисовки это грузит CPU почти на 100% на
+        // время всего копирования такой таблицы. Раз общее число строк неизвестно (rowsTotal ==
+        // null, source.countRows() не смог его получить) или равно 0 (копировать нечего), честного
+        // соотношения всё равно не показать — вместо анимации просто держим полоску пустой/полной.
         tableProgressBar.progress = event.rowsTotal?.let { total ->
-            if (total > 0) event.rowsCopied.toDouble() / total else -1.0
-        } ?: -1.0
+            if (total > 0) event.rowsCopied.toDouble() / total else 1.0
+        } ?: 0.0
     }
 
     private fun onFinished(sessionId: Int) {
