@@ -93,10 +93,14 @@ class CopyRunner {
             }
 
             // FK создаются отдельным проходом ПОСЛЕ того, как все выбранные таблицы гарантированно
-            // существуют на target (иначе REFERENCES на ещё не созданную таблицу упадёт).
-            log.info("Сессия {}: прохожу внешние ключи для {} таблиц", sessionId, allSelected.size)
+            // существуют на target (иначе REFERENCES на ещё не созданную таблицу упадёт). У этого
+            // прохода нет построчного прогресса (все таблицы уже помечены "done" в основном цикле
+            // выше) — без явного emit() здесь UI зависает с показателями последней скопированной
+            // таблицы на всё время этого прохода, не давая понять, сколько ещё осталось.
+            val fkPending = allSelected.filter { !it.foreignKeysCopied }
+            log.info("Сессия {}: прохожу внешние ключи для {} таблиц", sessionId, fkPending.size)
             val selectedNames = allSelected.map { it.tableName }.toSet()
-            for (table in allSelected.filter { !it.foreignKeysCopied }) {
+            for ((index, table) in fkPending.withIndex()) {
                 if (!isRunnable(sessionId)) {
                     log.info("Сессия {}: остановлена перед внешними ключами таблицы {}", sessionId, table.tableName)
                     return@withContext
@@ -107,6 +111,7 @@ class CopyRunner {
                 log.debug("Сессия {}: таблица {} — внешних ключей={}", sessionId, table.tableName, foreignKeys.size)
                 target.createForeignKeys(table.tableName, foreignKeys)
                 CopySessionRepository.markForeignKeysCopied(table.id)
+                emitPhaseProgress(sessionId, "foreign_keys", table.tableName, (index + 1).toLong(), fkPending.size.toLong())
             }
 
             target.enableForeignKeyChecks()
@@ -117,7 +122,8 @@ class CopyRunner {
             // view почти никогда не является валидным SQL — вместо предварительной проверки
             // диалекта просто пробуем создать и, если СУБД отвергла синтаксис, помечаем view как
             // требующую ручной адаптации, не прерывая копирование остальных объектов сессии.
-            for (view in CopySessionRepository.getViews(sessionId).filter { it.isSelected && it.status == "pending" }) {
+            val viewsPending = CopySessionRepository.getViews(sessionId).filter { it.isSelected && it.status == "pending" }
+            for ((index, view) in viewsPending.withIndex()) {
                 if (!isRunnable(sessionId)) {
                     log.info("Сессия {}: остановлена перед вьюхой {}", sessionId, view.viewName)
                     return@withContext
@@ -130,6 +136,7 @@ class CopyRunner {
                     log.warn("Сессия {}: вьюха {} требует ручной адаптации — {}", sessionId, view.viewName, e.message)
                     CopySessionRepository.updateViewStatus(view.id, "manual_adaptation_required")
                 }
+                emitPhaseProgress(sessionId, "views", view.viewName, (index + 1).toLong(), viewsPending.size.toLong())
             }
 
             CopySessionRepository.updateSessionStatus(sessionId, "completed")
@@ -214,6 +221,23 @@ class CopyRunner {
                 tableStatus = table.status,
                 rowsCopied = table.rowsCopied,
                 rowsTotal = table.rowsTotal,
+            )
+        )
+    }
+
+    // tableId=0 — у прохода FK/views нет своей CopySessionTableRecord на объект (это таблица или
+    // представление, обрабатываемое как единица прохода, а не строка данных); UI ориентируется на
+    // phase/rowsCopied/rowsTotal, а не на tableId, для этих событий.
+    private fun emitPhaseProgress(sessionId: Int, phase: String, name: String, processed: Long, total: Long) {
+        _progress.tryEmit(
+            CopyProgressEvent(
+                sessionId = sessionId,
+                tableId = 0,
+                tableName = name,
+                tableStatus = "in_progress",
+                rowsCopied = processed,
+                rowsTotal = total,
+                phase = phase,
             )
         )
     }

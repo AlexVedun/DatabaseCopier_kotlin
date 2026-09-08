@@ -221,8 +221,24 @@ class ProgressPanelController(
         val done = CopySessionRepository.getTables(event.sessionId).count { it.status == "done" }
         overallLabel.text = "Копирование: $done из $totalTables таблиц"
         overallProgressBar.progress = if (totalTables > 0) done.toDouble() / totalTables else 0.0
-        tableLabel.text = "${event.tableName}: ${event.rowsCopied}" +
-            (event.rowsTotal?.let { " из $it" } ?: " строк")
+
+        // FK/views — отдельные проходы ПОСЛЕ того, как все таблицы уже в статусе "done" (см.
+        // CopyRunner.run) — у них нет построчного прогресса как у копирования данных, только
+        // "обработано объектов X из Y" (переиспользует rowsCopied/rowsTotal в этом смысле для
+        // этих двух phase, см. CopyProgressEvent). Без отдельной ветки здесь пользователь во время
+        // этих проходов видел бы застывшую на последней скопированной таблице полоску без единого
+        // намёка на то, сколько ещё осталось — так и был обнаружен этот пробел.
+        val phaseLabel = when (event.phase) {
+            "foreign_keys" -> "Внешние ключи"
+            "views" -> "Представления"
+            else -> null
+        }
+        if (phaseLabel != null) {
+            tableLabel.text = "$phaseLabel: ${event.rowsCopied} из ${event.rowsTotal} (${event.tableName})"
+        } else {
+            tableLabel.text = "${event.tableName}: ${event.rowsCopied}" +
+                (event.rowsTotal?.let { " из $it" } ?: " строк")
+        }
         // progress = -1.0 (JavaFX "indeterminate") рисуется как непрерывно бегающая туда-сюда
         // анимированная полоска — из-за постоянной перерисовки это грузит CPU почти на 100% на
         // время всего копирования такой таблицы. Раз общее число строк неизвестно (rowsTotal ==
