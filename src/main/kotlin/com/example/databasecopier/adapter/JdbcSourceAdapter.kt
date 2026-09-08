@@ -563,15 +563,17 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
             return result
         }
 
+        // MySQL: тот же джойн-по-словарю паттерн, что и у PRIMARY KEY/CHECK (см. loadAllPrimaryKeys/
+        // loadAllCheckConstraints) — этот JOIN изначально стоял и здесь, по одному запросу на
+        // таблицу, и на практике зависал на минуты на каждой таблице против удалённого MySQL-сервера,
+        // хостящего десятки схем (493 таблицы в сессии = часы простоя, соединение к источнику успевало
+        // протухнуть по wait_timeout ещё до завершения самой первой такой таблицы).
+        if (config.type == DbType.MYSQL) {
+            val cache = foreignKeysBySchema ?: loadAllMysqlForeignKeys().also { foreignKeysBySchema = it }
+            return cache[table] ?: emptyList()
+        }
+
         val sql = when (config.type) {
-            DbType.MYSQL ->
-                "SELECT kcu.column_name, kcu.referenced_table_name AS referenced_table, " +
-                    "kcu.referenced_column_name AS referenced_column, rc.delete_rule AS on_delete, rc.update_rule AS on_update " +
-                    "FROM information_schema.key_column_usage kcu " +
-                    "JOIN information_schema.referential_constraints rc " +
-                    "  ON kcu.constraint_name = rc.constraint_name AND kcu.table_schema = rc.constraint_schema " +
-                    "  AND kcu.table_name = rc.table_name " +
-                    "WHERE kcu.table_name = ? AND kcu.referenced_table_name IS NOT NULL AND ${schemaClause("kcu")}"
             DbType.POSTGRESQL ->
                 "SELECT kcu.column_name, ccu.table_name AS referenced_table, ccu.column_name AS referenced_column, " +
                     "rc.delete_rule AS on_delete, rc.update_rule AS on_update " +
@@ -601,6 +603,72 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
                     )
                 }
             }
+        }
+        return result
+    }
+
+    // Кэшируется на всю сессию, наполняется один раз (см. primaryKeysBySchema/checkConstraintsBySchema
+    // для того же паттерна и подробного обоснования).
+    private var foreignKeysBySchema: Map<String, List<ForeignKeyRef>>? = null
+
+    private data class RawFk(
+        val tableName: String,
+        val constraintName: String,
+        val columnName: String,
+        val referencedTable: String,
+        val referencedColumn: String,
+    )
+
+    private fun loadAllMysqlForeignKeys(): Map<String, List<ForeignKeyRef>> {
+        // key_column_usage у MySQL (в отличие от Postgres) уже хранит referenced_table_name/
+        // referenced_column_name прямо в себе — без JOIN с table_constraints. Единственное, зачем
+        // раньше был нужен JOIN — delete_rule/update_rule, которые лежат только в
+        // referential_constraints. Читаем их отдельным однотабличным запросом и склеиваем по
+        // (table_name, constraint_name) уже в Kotlin — тот же приём, что и для CHECK-ограничений.
+        val fkColumns = mutableListOf<RawFk>()
+        connection.createStatement().use { stmt ->
+            stmt.executeQuery(
+                "SELECT table_name, constraint_name, column_name, referenced_table_name, referenced_column_name " +
+                    "FROM information_schema.key_column_usage " +
+                    "WHERE referenced_table_name IS NOT NULL AND ${schemaClause()}"
+            ).use { rs ->
+                while (rs.next()) {
+                    fkColumns.add(
+                        RawFk(
+                            tableName = rs.getString("table_name"),
+                            constraintName = rs.getString("constraint_name"),
+                            columnName = rs.getString("column_name"),
+                            referencedTable = rs.getString("referenced_table_name"),
+                            referencedColumn = rs.getString("referenced_column_name"),
+                        )
+                    )
+                }
+            }
+        }
+        val actionsByConstraint = mutableMapOf<Pair<String, String>, Pair<String?, String?>>()
+        connection.createStatement().use { stmt ->
+            stmt.executeQuery(
+                "SELECT table_name, constraint_name, delete_rule, update_rule " +
+                    "FROM information_schema.referential_constraints WHERE constraint_schema = '${config.database}'"
+            ).use { rs ->
+                while (rs.next()) {
+                    actionsByConstraint[rs.getString("table_name") to rs.getString("constraint_name")] =
+                        rs.getString("delete_rule") to rs.getString("update_rule")
+                }
+            }
+        }
+        val result = LinkedHashMap<String, MutableList<ForeignKeyRef>>()
+        for (fk in fkColumns) {
+            val (onDelete, onUpdate) = actionsByConstraint[fk.tableName to fk.constraintName] ?: (null to null)
+            result.getOrPut(fk.tableName) { mutableListOf() }.add(
+                ForeignKeyRef(
+                    columnName = fk.columnName,
+                    referencedTable = fk.referencedTable,
+                    referencedColumn = fk.referencedColumn,
+                    onDelete = parseAction(onDelete),
+                    onUpdate = parseAction(onUpdate),
+                )
+            )
         }
         return result
     }
