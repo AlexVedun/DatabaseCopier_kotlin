@@ -36,10 +36,10 @@ dependencies {
     implementation("org.xerial:sqlite-jdbc:3.46.0.0")
     implementation("com.mysql:mysql-connector-j:8.4.0")
     implementation("org.postgresql:postgresql:42.7.3")
-    implementation("com.microsoft.sqlserver:mssql-jdbc:12.6.1.jre11")
+    implementation("com.microsoft.sqlserver:mssql-jdbc:13.2.1.jre11")
 
     // Logging
-    implementation("ch.qos.logback:logback-classic:1.5.6")
+    implementation("ch.qos.logback:logback-classic:1.5.13")
 
     // Testing
     testImplementation(kotlin("test"))
