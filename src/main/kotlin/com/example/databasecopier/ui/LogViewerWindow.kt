@@ -8,6 +8,7 @@ import javafx.scene.Scene
 import javafx.scene.control.Button
 import javafx.scene.control.Label
 import javafx.scene.control.TextArea
+import javafx.scene.input.ScrollEvent
 import javafx.scene.layout.BorderPane
 import javafx.scene.layout.HBox
 import javafx.stage.Stage
@@ -27,12 +28,28 @@ import java.nio.charset.StandardCharsets
  */
 class LogViewerWindow {
 
+    companion object {
+        // Штатный шаг прокрутки TextArea колесом мыши по ощущениям кратно медленнее, чем в обычном
+        // текстовом редакторе/браузере — подобрано эмпирически, не привязано к какой-либо единице
+        // JavaFX API (deltaY сам по себе платформозависим).
+        private const val SCROLL_SPEED_MULTIPLIER = 6.0
+    }
+
     private val logFile = getAppDataDir().resolve("logs").resolve("app.log")
 
     private val textArea = TextArea().apply {
         isEditable = false
         isWrapText = false
         style = "-fx-font-family: monospace;"
+        // TextArea сама обрабатывает прокрутку колесом мыши с фиксированным, довольно медленным
+        // шагом (не настраивается штатным API) — на лог-файле в десятки тысяч строк это неудобно.
+        // Перехватываем ScrollEvent на фазе filter (раньше, чем сама TextArea) и двигаем scrollTop
+        // на deltaY с увеличенным множителем сами, гася событие, чтобы штатная (медленная)
+        // прокрутка не сработала следом ещё и от исходного deltaY.
+        addEventFilter(ScrollEvent.SCROLL) { event ->
+            scrollTop -= event.deltaY * SCROLL_SPEED_MULTIPLIER
+            event.consume()
+        }
     }
 
     private val statusLabel = Label()

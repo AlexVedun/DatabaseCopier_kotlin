@@ -28,7 +28,9 @@ class DatabaseCopierApp : Application() {
             top = buildMenuBar()
             center = contentPane
         }
-        val scene = Scene(root, 900.0, 800.0)
+        // +30 — типичная высота MenuBar (Modena) — чтобы её появление не отъедало у contentPane
+        // высоту, которая раньше (до добавления строки меню) была у него целиком.
+        val scene = Scene(root, 900.0, 830.0)
         stage.title = "Database Copier"
         stage.scene = scene
         stage.show()
