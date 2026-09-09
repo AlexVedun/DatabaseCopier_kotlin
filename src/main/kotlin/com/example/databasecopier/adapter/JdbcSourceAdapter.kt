@@ -246,11 +246,38 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
         return result
     }
 
+    // Кэшируется на всю сессию (тот же приём, что и у primaryKeysBySchema/checkConstraintsBySchema/
+    // foreignKeysBySchema) — но здесь причина не JOIN: даже однотабличный WHERE table_name = ?
+    // запрос к information_schema.columns на практике наблюдался зависающим на минуты (подтверждено
+    // jstack: блокировка на чтении сокета внутри getColumnComments) на этом же удалённом MySQL,
+    // хостящем десятки схем — похоже, information_schema там не проталкивает фильтр по имени таблицы
+    // на уровне сервера и материализует ответ по всему словарю независимо от WHERE. При 493 таблицах
+    // в сессии повторение такого запроса один раз на таблицу означает часы простоя вместо одного
+    // запроса, отфильтрованного только по схеме (более дешёвого предиката).
+    private var columnCommentsBySchema: Map<String, Map<String, String>>? = null
+
+    private fun loadAllMysqlColumnComments(): Map<String, Map<String, String>> {
+        val result = LinkedHashMap<String, MutableMap<String, String>>()
+        connection.createStatement().use { stmt ->
+            stmt.executeQuery(
+                "SELECT table_name, column_name, column_comment FROM information_schema.columns " +
+                    "WHERE column_comment != '' AND ${schemaClause()}"
+            ).use { rs ->
+                while (rs.next()) {
+                    result.getOrPut(rs.getString("table_name")) { mutableMapOf() }[rs.getString("column_name")] =
+                        rs.getString("column_comment")
+                }
+            }
+        }
+        return result
+    }
+
     private fun getColumnComments(table: String): Map<String, String> {
+        if (config.type == DbType.MYSQL) {
+            val cache = columnCommentsBySchema ?: loadAllMysqlColumnComments().also { columnCommentsBySchema = it }
+            return cache[table] ?: emptyMap()
+        }
         val sql = when (config.type) {
-            DbType.MYSQL ->
-                "SELECT column_name, column_comment FROM information_schema.columns " +
-                    "WHERE table_name = ? AND column_comment != '' AND ${schemaClause()}"
             DbType.POSTGRESQL ->
                 "SELECT a.attname AS column_name, d.description AS column_comment " +
                     "FROM pg_description d JOIN pg_class c ON d.objoid = c.oid " +
@@ -272,10 +299,25 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
         return result
     }
 
+    // Тот же приём кэширования на сессию, что и у columnCommentsBySchema — см. её комментарий.
+    private var tableCommentsBySchema: Map<String, String>? = null
+
+    private fun loadAllMysqlTableComments(): Map<String, String> {
+        val result = mutableMapOf<String, String>()
+        connection.createStatement().use { stmt ->
+            stmt.executeQuery(
+                "SELECT table_name, table_comment FROM information_schema.tables WHERE table_comment != '' AND ${schemaClause()}"
+            ).use { rs -> while (rs.next()) result[rs.getString("table_name")] = rs.getString("table_comment") }
+        }
+        return result
+    }
+
     private fun getTableComment(table: String): String? {
+        if (config.type == DbType.MYSQL) {
+            val cache = tableCommentsBySchema ?: loadAllMysqlTableComments().also { tableCommentsBySchema = it }
+            return cache[table]
+        }
         val sql = when (config.type) {
-            DbType.MYSQL ->
-                "SELECT table_comment FROM information_schema.tables WHERE table_name = ? AND table_comment != '' AND ${schemaClause()}"
             DbType.POSTGRESQL ->
                 "SELECT d.description FROM pg_description d JOIN pg_class c ON d.objoid = c.oid " +
                     "WHERE c.relname = ? AND d.objsubid = 0"
@@ -291,14 +333,53 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
         }
     }
 
-    private fun getIndexes(table: String): List<IndexDef> {
-        data class Row(val indexName: String, val columnName: String, val unique: Boolean, val position: Int, val indexType: String?)
-        val sql = when (config.type) {
-            DbType.MYSQL ->
-                "SELECT index_name, column_name, non_unique = 0 AS is_unique, seq_in_index AS position, index_type " +
+    private data class IndexRow(val indexName: String, val columnName: String, val unique: Boolean, val position: Int, val indexType: String?)
+
+    private fun buildIndexDefs(rows: List<IndexRow>): List<IndexDef> =
+        rows.groupBy { it.indexName }.map { (name, cols) ->
+            // FULLTEXT/SPATIAL индексы MySQL не подчиняются обычному лимиту длины ключа BTREE-индекса —
+            // без различения типа они пересоздавались бы на target как обычный составной CREATE INDEX
+            // и падали с "Specified key was too long" на любых TEXT/BLOB-колонках (см. Types.kt).
+            val kind = when (cols.first().indexType?.uppercase()) {
+                "FULLTEXT" -> IndexKind.FULLTEXT
+                "SPATIAL" -> IndexKind.SPATIAL
+                else -> IndexKind.NORMAL
+            }
+            IndexDef(name, cols.sortedBy { it.position }.map { it.columnName }, cols.first().unique, kind)
+        }
+
+    // Тот же приём кэширования на сессию, что и у columnCommentsBySchema — см. её комментарий.
+    private var indexesBySchema: Map<String, List<IndexDef>>? = null
+
+    private fun loadAllMysqlIndexes(): Map<String, List<IndexDef>> {
+        data class RawRow(val tableName: String, val row: IndexRow)
+        val rows = mutableListOf<RawRow>()
+        connection.createStatement().use { stmt ->
+            stmt.executeQuery(
+                "SELECT table_name, index_name, column_name, non_unique = 0 AS is_unique, seq_in_index AS position, index_type " +
                     "FROM information_schema.statistics " +
-                    "WHERE table_name = ? AND index_name != 'PRIMARY' AND ${schemaClause()} " +
-                    "ORDER BY index_name, seq_in_index"
+                    "WHERE index_name != 'PRIMARY' AND ${schemaClause()} " +
+                    "ORDER BY table_name, index_name, seq_in_index"
+            ).use { rs ->
+                while (rs.next()) {
+                    rows.add(
+                        RawRow(
+                            rs.getString("table_name"),
+                            IndexRow(rs.getString("index_name"), rs.getString("column_name"), rs.getBoolean("is_unique"), rs.getInt("position"), rs.getString("index_type")),
+                        )
+                    )
+                }
+            }
+        }
+        return rows.groupBy { it.tableName }.mapValues { (_, tableRows) -> buildIndexDefs(tableRows.map { it.row }) }
+    }
+
+    private fun getIndexes(table: String): List<IndexDef> {
+        if (config.type == DbType.MYSQL) {
+            val cache = indexesBySchema ?: loadAllMysqlIndexes().also { indexesBySchema = it }
+            return cache[table] ?: emptyList()
+        }
+        val sql = when (config.type) {
             DbType.POSTGRESQL ->
                 "SELECT ic.relname AS index_name, a.attname AS column_name, ix.indisunique AS is_unique, " +
                     "array_position(ix.indkey, a.attnum) AS position " +
@@ -318,27 +399,16 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
                     "ORDER BY i.name, ic.key_ordinal"
             else -> return emptyList()
         }
-        val rows = mutableListOf<Row>()
+        val rows = mutableListOf<IndexRow>()
         connection.prepareStatement(sql).use { ps ->
             ps.setString(1, table)
             ps.executeQuery().use { rs ->
                 while (rs.next()) {
-                    val indexType = if (config.type == DbType.MYSQL) rs.getString("index_type") else null
-                    rows.add(Row(rs.getString("index_name"), rs.getString("column_name"), rs.getBoolean("is_unique"), rs.getInt("position"), indexType))
+                    rows.add(IndexRow(rs.getString("index_name"), rs.getString("column_name"), rs.getBoolean("is_unique"), rs.getInt("position"), null))
                 }
             }
         }
-        return rows.groupBy { it.indexName }.map { (name, cols) ->
-            // FULLTEXT/SPATIAL индексы MySQL не подчиняются обычному лимиту длины ключа BTREE-индекса —
-            // без различения типа они пересоздавались бы на target как обычный составной CREATE INDEX
-            // и падали с "Specified key was too long" на любых TEXT/BLOB-колонках (см. Types.kt).
-            val kind = when (cols.first().indexType?.uppercase()) {
-                "FULLTEXT" -> IndexKind.FULLTEXT
-                "SPATIAL" -> IndexKind.SPATIAL
-                else -> IndexKind.NORMAL
-            }
-            IndexDef(name, cols.sortedBy { it.position }.map { it.columnName }, cols.first().unique, kind)
-        }
+        return buildIndexDefs(rows)
     }
 
     // Тот же джойн-по-словарю паттерн, что и у PRIMARY KEY (см. loadAllPrimaryKeys) — тоже кэшируется
