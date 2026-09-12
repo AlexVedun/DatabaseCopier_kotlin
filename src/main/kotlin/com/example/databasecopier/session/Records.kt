@@ -37,3 +37,12 @@ data class CopySessionViewRecord(
     val isSelected: Boolean,
     val status: String, // pending/done/manual_adaptation_required/failed
 )
+
+data class CopySessionRoutineRecord(
+    val id: Int,
+    val copySessionId: Int,
+    val routineName: String,
+    val routineKind: String, // procedure/function
+    val isSelected: Boolean,
+    val status: String, // pending/done/manual_adaptation_required/failed
+)

@@ -14,6 +14,13 @@ interface SourceAdapter {
     /** Тело SELECT-запроса view как есть в источнике — переносится на target только когда
      *  диалекты совпадают, см. TargetAdapter.createView(). */
     fun getViewDefinition(view: String): String
+    /** Хранимые процедуры источника (и функции — только для MySQL, см. RoutineKind). Пусто для
+     *  дамп-источников и для SQLite (там их нет вовсе). */
+    fun listRoutines(): List<RoutineRef>
+    /** Полный текст CREATE PROCEDURE/CREATE FUNCTION как есть в источнике — переносится на target
+     *  только когда диалекты совпадают (синтаксис тела процедуры почти никогда не портируется
+     *  между диалектами даже частично, в отличие от view), см. TargetAdapter.createRoutine(). */
+    fun getRoutineDefinition(routine: RoutineRef): String
     fun readBatch(table: String, cursor: JsonElement?, batchSize: Int): BatchResult
     fun close()
 }

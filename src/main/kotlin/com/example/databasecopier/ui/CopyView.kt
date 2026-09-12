@@ -48,6 +48,12 @@ class CopyView(existingSessionId: Int? = null, onBackToSessions: (() -> Unit)? =
     init {
         if (existingSessionId != null) {
             progressPanel.resumeSession(existingSessionId)
+        } else {
+            // Список хранимых процедур/функций в sourcePanel зависит от типа target-БД (копируются
+            // только между источником и приёмником одного типа, см. SourcePanelController) — панели
+            // независимы друг от друга, поэтому связываем их здесь, а не внутри самих панелей.
+            sourcePanel.targetDbType = targetPanel.dbType
+            targetPanel.onDbTypeChanged { sourcePanel.targetDbType = it }
         }
     }
 }

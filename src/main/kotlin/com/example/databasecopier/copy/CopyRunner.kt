@@ -1,5 +1,7 @@
 package com.example.databasecopier.copy
 
+import com.example.databasecopier.adapter.RoutineKind
+import com.example.databasecopier.adapter.RoutineRef
 import com.example.databasecopier.adapter.SourceAdapter
 import com.example.databasecopier.adapter.TargetAdapter
 import com.example.databasecopier.session.CopySessionRepository
@@ -137,6 +139,28 @@ class CopyRunner {
                     CopySessionRepository.updateViewStatus(view.id, "manual_adaptation_required")
                 }
                 emitPhaseProgress(sessionId, "views", view.viewName, (index + 1).toLong(), viewsPending.size.toLong())
+            }
+
+            // Хранимые процедуры/функции — тот же принцип, что и views: UI разрешает их выбор только
+            // когда тип source и target совпадает (см. SourcePanelController), поэтому здесь не
+            // делается отдельной проверки диалектов — только защитный try/catch на случай, если
+            // target СУБД всё же отвергнет синтаксис (например, из-за версии сервера).
+            val routinesPending = CopySessionRepository.getRoutines(sessionId).filter { it.isSelected && it.status == "pending" }
+            for ((index, routine) in routinesPending.withIndex()) {
+                if (!isRunnable(sessionId)) {
+                    log.info("Сессия {}: остановлена перед процедурой/функцией {}", sessionId, routine.routineName)
+                    return@withContext
+                }
+                try {
+                    val ref = RoutineRef(routine.routineName, RoutineKind.valueOf(routine.routineKind.uppercase()))
+                    val definition = source.getRoutineDefinition(ref)
+                    target.createRoutine(ref, definition)
+                    CopySessionRepository.updateRoutineStatus(routine.id, "done")
+                } catch (e: Exception) {
+                    log.warn("Сессия {}: процедура/функция {} требует ручной адаптации — {}", sessionId, routine.routineName, e.message)
+                    CopySessionRepository.updateRoutineStatus(routine.id, "manual_adaptation_required")
+                }
+                emitPhaseProgress(sessionId, "routines", routine.routineName, (index + 1).toLong(), routinesPending.size.toLong())
             }
 
             CopySessionRepository.updateSessionStatus(sessionId, "completed")

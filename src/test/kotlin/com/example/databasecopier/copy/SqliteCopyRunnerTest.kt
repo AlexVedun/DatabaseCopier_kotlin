@@ -1,6 +1,7 @@
 package com.example.databasecopier.copy
 
 import com.example.databasecopier.CopySessionTables
+import com.example.databasecopier.CopySessionRoutines
 import com.example.databasecopier.CopySessionViews
 import com.example.databasecopier.CopySessions
 import com.example.databasecopier.Connections
@@ -37,7 +38,7 @@ class SqliteCopyRunnerTest {
         serviceDbFile = tempSqliteFile("copier-sqlite-service-")
         Database.connect("jdbc:sqlite:${serviceDbFile.absolutePath}", driver = "org.sqlite.JDBC")
         transaction {
-            SchemaUtils.createMissingTablesAndColumns(Connections, CopySessions, CopySessionTables, CopySessionViews)
+            SchemaUtils.createMissingTablesAndColumns(Connections, CopySessions, CopySessionTables, CopySessionViews, CopySessionRoutines)
         }
 
         val sourceFile = tempSqliteFile("copier-sqlite-source-")

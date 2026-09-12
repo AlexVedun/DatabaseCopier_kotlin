@@ -198,6 +198,25 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
         connection.commit()
     }
 
+    override fun createRoutine(routine: RoutineRef, definition: String) {
+        connection.createStatement().use { stmt ->
+            when (config.type) {
+                // MySQL/MSSQL: definition — это "голый" CREATE PROCEDURE/CREATE FUNCTION без
+                // OR REPLACE (MySQL вообще не поддерживает такой синтаксис для процедур/функций;
+                // MSSQL — только начиная с CREATE OR ALTER, который может не быть в исходном тексте
+                // из sys.sql_modules) — существующий объект нужно сносить явно перед пересозданием.
+                DbType.MYSQL -> stmt.execute("DROP ${routine.kind.name} IF EXISTS ${quote(routine.name)}")
+                DbType.SQLSERVER -> stmt.execute("DROP PROCEDURE IF EXISTS ${quote(routine.name)}")
+                // Postgres: definition уже содержит "CREATE OR REPLACE ..." (см.
+                // JdbcSourceAdapter.getRoutineDefinition, pg_get_functiondef) — сам себя пересоздаёт.
+                DbType.POSTGRESQL -> {}
+                DbType.SQLITE -> throw UnsupportedOperationException("SQLite does not support stored routines")
+            }
+            stmt.execute(definition)
+        }
+        connection.commit()
+    }
+
     override fun createIndexesAndConstraints(structure: TableStructure) {
         val columnsByName = structure.columns.associateBy { it.name }
         connection.createStatement().use { stmt ->

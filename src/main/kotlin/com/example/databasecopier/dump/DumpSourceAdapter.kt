@@ -2,6 +2,7 @@ package com.example.databasecopier.dump
 
 import com.example.databasecopier.adapter.BatchResult
 import com.example.databasecopier.adapter.ForeignKeyRef
+import com.example.databasecopier.adapter.RoutineRef
 import com.example.databasecopier.adapter.SourceAdapter
 import com.example.databasecopier.adapter.TableStructure
 import kotlinx.serialization.json.JsonElement
@@ -46,6 +47,12 @@ class DumpSourceAdapter(private val file: File, private val dialect: DumpDialect
 
     override fun getViewDefinition(view: String): String =
         throw UnsupportedOperationException("Dump sources do not support views")
+
+    // Парсер дампов не индексирует CREATE PROCEDURE/CREATE FUNCTION — по тем же причинам, что и views.
+    override fun listRoutines(): List<RoutineRef> = emptyList()
+
+    override fun getRoutineDefinition(routine: RoutineRef): String =
+        throw UnsupportedOperationException("Dump sources do not support stored routines")
 
     override fun readBatch(table: String, cursor: JsonElement?, batchSize: Int): BatchResult {
         val info = index[table] ?: error("Table not found in dump: $table")

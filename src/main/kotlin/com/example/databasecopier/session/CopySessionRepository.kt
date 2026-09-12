@@ -1,5 +1,6 @@
 package com.example.databasecopier.session
 
+import com.example.databasecopier.CopySessionRoutines
 import com.example.databasecopier.CopySessionTables
 import com.example.databasecopier.CopySessionViews
 import com.example.databasecopier.CopySessions
@@ -67,6 +68,26 @@ object CopySessionRepository {
     fun updateViewStatus(id: Int, status: String) = transaction {
         CopySessionViews.update({ CopySessionViews.id eq id }) {
             it[CopySessionViews.status] = status
+        }
+    }
+
+    fun addRoutine(sessionId: Int, routineName: String, routineKind: String, isSelected: Boolean = false): Int = transaction {
+        (CopySessionRoutines.insert {
+            it[copySessionId] = sessionId
+            it[CopySessionRoutines.routineName] = routineName
+            it[CopySessionRoutines.routineKind] = routineKind
+            it[CopySessionRoutines.isSelected] = isSelected
+            it[status] = "pending"
+        } get CopySessionRoutines.id)
+    }
+
+    fun getRoutines(sessionId: Int): List<CopySessionRoutineRecord> = transaction {
+        CopySessionRoutines.select { CopySessionRoutines.copySessionId eq sessionId }.map { it.toRoutineRecord() }
+    }
+
+    fun updateRoutineStatus(id: Int, status: String) = transaction {
+        CopySessionRoutines.update({ CopySessionRoutines.id eq id }) {
+            it[CopySessionRoutines.status] = status
         }
     }
 
@@ -180,5 +201,14 @@ object CopySessionRepository {
         viewName = this[CopySessionViews.viewName],
         isSelected = this[CopySessionViews.isSelected],
         status = this[CopySessionViews.status],
+    )
+
+    private fun ResultRow.toRoutineRecord() = CopySessionRoutineRecord(
+        id = this[CopySessionRoutines.id],
+        copySessionId = this[CopySessionRoutines.copySessionId],
+        routineName = this[CopySessionRoutines.routineName],
+        routineKind = this[CopySessionRoutines.routineKind],
+        isSelected = this[CopySessionRoutines.isSelected],
+        status = this[CopySessionRoutines.status],
     )
 }

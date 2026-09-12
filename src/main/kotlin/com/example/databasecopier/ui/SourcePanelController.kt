@@ -2,7 +2,9 @@ package com.example.databasecopier.ui
 
 import com.example.databasecopier.AppScope
 import com.example.databasecopier.adapter.ConnectionConfig
+import com.example.databasecopier.adapter.DbType
 import com.example.databasecopier.adapter.JdbcSourceAdapter
+import com.example.databasecopier.adapter.RoutineRef
 import com.example.databasecopier.adapter.SourceAdapter
 import com.example.databasecopier.connection.ConnectionRepository
 import com.example.databasecopier.dump.DumpDialect
@@ -67,7 +69,7 @@ class SourcePanelController {
 
     private val tablesTable = TableView<TableSelection>().apply {
         isEditable = true
-        prefHeight = 150.0
+        prefHeight = 100.0
         maxWidth = Double.MAX_VALUE
         // CONSTRAINED_RESIZE_POLICY растягивает колонки на всю ширину TableView, а не только
         // саму таблицу на всю ширину окна — иначе справа от "Таблица" осталась бы пустая полоса.
@@ -97,7 +99,7 @@ class SourcePanelController {
     // может быть пуст, если в источнике нет представлений — блок тогда просто ничего не показывает.
     private val viewsTable = TableView<TableSelection>().apply {
         isEditable = true
-        prefHeight = 150.0
+        prefHeight = 100.0
         maxWidth = Double.MAX_VALUE
         columnResizePolicy = TableView.CONSTRAINED_RESIZE_POLICY
         val selectedColumn = TableColumn<TableSelection, Boolean>("").apply {
@@ -114,17 +116,58 @@ class SourcePanelController {
         columns.addAll(selectedColumn, nameColumn)
     }
 
+    // Хранимые процедуры (и для MySQL — также функции, см. RoutineKind) — по решению пользователя
+    // копируются только между источником и приёмником одного типа БД (синтаксис тела процедуры
+    // почти никогда не портируется между диалектами даже частично, в отличие от view, где хотя бы
+    // иногда можно попробовать и откатиться). Список поэтому не просто пуст, а явно недоступен
+    // (через placeholder, см. refreshRoutinesVisibility), когда типы не совпадают — targetDbType
+    // передаётся снаружи (CopyView), т.к. TargetPanelController — независимая, отдельная панель.
+    private val routinesTable = TableView<RoutineSelection>().apply {
+        isEditable = true
+        prefHeight = 100.0
+        maxWidth = Double.MAX_VALUE
+        columnResizePolicy = TableView.CONSTRAINED_RESIZE_POLICY
+        val selectedColumn = TableColumn<RoutineSelection, Boolean>("").apply {
+            cellValueFactory = javafx.util.Callback { it.value.selectedProperty }
+            cellFactory = CheckBoxTableCell.forTableColumn(this)
+            isEditable = true
+            prefWidth = 40.0
+            maxWidth = 40.0
+        }
+        val nameColumn = TableColumn<RoutineSelection, String>("Процедура/функция").apply {
+            cellValueFactory = javafx.util.Callback { it.value.nameProperty }
+            prefWidth = 200.0
+        }
+        val kindColumn = TableColumn<RoutineSelection, String>("Тип").apply {
+            cellValueFactory = javafx.util.Callback { it.value.kindProperty }
+            prefWidth = 90.0
+        }
+        columns.addAll(selectedColumn, nameColumn, kindColumn)
+    }
+
     private var selection: SourceSelection? = null
     // Кол-во строк на таблицу, как его отдал SourceAdapter.listTables() (точный COUNT(*) для живых
     // БД, дешёвая оценка для дампов — см. DumpIndexer) — сохраняется, чтобы передать в сессию как
     // rowsTotal при старте копирования, не пересчитывая ещё раз.
     private var lastRowCounts: Map<String, Long?> = emptyMap()
+    // Полный список процедур/функций источника (независимо от того, совпадает ли сейчас тип
+    // приёмника) — запрашивается один раз при подключении; видимость в routinesTable пересчитывает
+    // refreshRoutinesVisibility() при каждом изменении targetDbType, без повторного похода в БД.
+    private var lastRoutines: List<RoutineRef> = emptyList()
+
+    // Устанавливается снаружи (CopyView) при каждом изменении типа БД в TargetPanelController —
+    // см. комментарий у routinesTable.
+    var targetDbType: DbType? = null
+        set(value) {
+            field = value
+            refreshRoutinesVisibility()
+        }
 
     val connectedProperty = SimpleBooleanProperty(false)
 
-    // Элементы управления источником — слева; список таблиц/views (которые появляются только
-    // после успешного подключения) — справа, чтобы длинная таблица с сотнями строк не растягивала
-    // окно вниз под формой подключения (см. Шаг 15 инструкции).
+    // Элементы управления источником — слева; список таблиц/views/процедур (которые появляются
+    // только после успешного подключения) — справа, чтобы длинная таблица с сотнями строк не
+    // растягивала окно вниз под формой подключения (см. Шаг 15 инструкции).
     private val controlsColumn = VBox(8.0, HBox(16.0, connectionModeRadio, dumpModeRadio), connectionBox, dumpBox)
     private val tablesColumn = VBox(
         8.0,
@@ -132,6 +175,8 @@ class SourcePanelController {
         tablesTable,
         Label("Представления (views), необязательно:"),
         viewsTable,
+        Label("Хранимые процедуры/функции, необязательно:"),
+        routinesTable,
     ).apply { maxWidth = Double.MAX_VALUE }
 
     val view = VBox(
@@ -151,8 +196,10 @@ class SourcePanelController {
             connectedProperty.set(false)
             selection = null
             lastRowCounts = emptyMap()
+            lastRoutines = emptyList()
             tablesTable.items.clear()
             viewsTable.items.clear()
+            refreshRoutinesVisibility()
         }
     }
 
@@ -162,7 +209,28 @@ class SourcePanelController {
 
     fun selectedViews(): List<String> = viewsTable.items.filter { it.isSelected }.map { it.name }
 
+    fun selectedRoutines(): List<RoutineRef> = routinesTable.items.filter { it.isSelected }.map { RoutineRef(it.name, it.kind) }
+
     fun currentSelection(): SourceSelection? = selection
+
+    // Хранимые процедуры/функции разрешено копировать только между источником и приёмником одного
+    // типа БД (см. комментарий у routinesTable) — источник-дамп их не индексирует вовсе (аналогично
+    // views), поэтому список в обоих случаях просто недоступен, а не тихо остаётся пустым без
+    // объяснения, будто в источнике действительно ничего нет.
+    private fun refreshRoutinesVisibility() {
+        val sel = selection
+        val target = targetDbType
+        if (sel is SourceSelection.Connection && target != null && sel.config.type == target) {
+            routinesTable.items.setAll(lastRoutines.sortedBy { it.name }.map { RoutineSelection(it.name, it.kind, false) })
+            routinesTable.placeholder = Label("В источнике нет хранимых процедур/функций")
+        } else {
+            routinesTable.items.clear()
+            routinesTable.placeholder = Label(
+                if (sel is SourceSelection.Connection) "Доступно только когда источник и приёмник — БД одного типа"
+                else "Недоступно для источника-дампа"
+            )
+        }
+    }
 
     /** Создаёт новый экземпляр адаптера для реального копирования (тестовый уже закрыт после проверки). */
     fun createAdapter(): SourceAdapter = when (val sel = selection) {
@@ -192,12 +260,15 @@ class SourcePanelController {
                 adapter.connect()
                 val tables = adapter.listTables()
                 val views = adapter.listViews()
+                val routines = adapter.listRoutines()
                 val savedId = ConnectionRepository.save("${config.host}:${config.database}", config)
                 withContext(Dispatchers.Main) {
                     selection = SourceSelection.Connection(config, savedId)
                     lastRowCounts = tables
+                    lastRoutines = routines
                     tablesTable.items.setAll(tables.keys.sorted().map { TableSelection(it, true) })
                     viewsTable.items.setAll(views.sorted().map { TableSelection(it, false) })
+                    refreshRoutinesVisibility()
                     form.statusLabel.text = "Подключено. Таблиц: ${tables.size}"
                     connectedProperty.set(true)
                 }
@@ -246,9 +317,11 @@ class SourcePanelController {
                 withContext(Dispatchers.Main) {
                     selection = SourceSelection.Dump(file, dialect)
                     lastRowCounts = tables
+                    lastRoutines = emptyList()
                     tablesTable.items.setAll(tables.keys.sorted().map { TableSelection(it, true) })
-                    // Парсер дампов не индексирует views (Шаг 13) — список всегда пуст для дампов.
+                    // Парсер дампов не индексирует views/процедуры (Шаг 13) — список всегда пуст для дампов.
                     viewsTable.items.clear()
+                    refreshRoutinesVisibility()
                     dumpStatusLabel.text = "Разобрано. Таблиц: ${tables.size}"
                     connectedProperty.set(true)
                 }

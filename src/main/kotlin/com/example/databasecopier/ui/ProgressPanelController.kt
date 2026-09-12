@@ -107,6 +107,9 @@ class ProgressPanelController(
         )
         tables.forEach { CopySessionRepository.addTable(newSessionId, it, rowsTotal = source.rowsTotalFor(it)) }
         source.selectedViews().forEach { CopySessionRepository.addView(newSessionId, it, isSelected = true) }
+        source.selectedRoutines().forEach {
+            CopySessionRepository.addRoutine(newSessionId, it.name, it.kind.name.lowercase(), isSelected = true)
+        }
 
         launchCopy(newSessionId, source.createAdapter(), targetConfig, tables.size)
     }
@@ -231,6 +234,7 @@ class ProgressPanelController(
         val phaseLabel = when (event.phase) {
             "foreign_keys" -> "Внешние ключи"
             "views" -> "Представления"
+            "routines" -> "Процедуры/функции"
             else -> null
         }
         if (phaseLabel != null) {

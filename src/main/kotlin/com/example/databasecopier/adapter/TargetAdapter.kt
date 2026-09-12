@@ -11,6 +11,10 @@ interface TargetAdapter {
      *  безопасно ли переносить его без трансляции (см. Шаг 13 инструкции — только между одинаковыми
      *  диалектами), этот метод просто выполняет DROP VIEW IF EXISTS + CREATE VIEW. */
     fun createView(name: String, definition: String)
+    /** definition — полный текст CREATE PROCEDURE/CREATE FUNCTION как есть у источника (см.
+     *  SourceAdapter.getRoutineDefinition) — вызывающая сторона (CopyRunner) сама решает,
+     *  безопасно ли его переносить (только между одинаковыми диалектами). */
+    fun createRoutine(routine: RoutineRef, definition: String)
     /** Синхронизирует счётчик автоинкремента/identity/sequence, чтобы новые строки после
      *  копирования не конфликтовали по PK с уже скопированными. Вызывается только для колонок
      *  с [ColumnDef.autoIncrement] после того, как все строки таблицы уже скопированы. */

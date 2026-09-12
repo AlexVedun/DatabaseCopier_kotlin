@@ -71,3 +71,10 @@ data class ForeignKeyRef(
 )
 
 data class BatchResult(val rows: List<Map<String, Any?>>, val nextCursor: JsonElement?)
+
+// FUNCTION поддерживается только для MySQL (см. JdbcSourceAdapter/JdbcTargetAdapter) — в Postgres/
+// MSSQL хранимые процедуры и функции синтаксически и семантически различаются сильнее, чем в MySQL,
+// и по факту решили копировать только PROCEDURE для них.
+enum class RoutineKind { PROCEDURE, FUNCTION }
+
+data class RoutineRef(val name: String, val kind: RoutineKind)

@@ -2,6 +2,7 @@ package com.example.databasecopier.ui
 
 import com.example.databasecopier.AppScope
 import com.example.databasecopier.adapter.ConnectionConfig
+import com.example.databasecopier.adapter.DbType
 import com.example.databasecopier.adapter.JdbcTargetAdapter
 import com.example.databasecopier.connection.ConnectionRepository
 import javafx.beans.property.SimpleBooleanProperty
@@ -36,6 +37,16 @@ class TargetPanelController {
         private set
 
     val connectedProperty = SimpleBooleanProperty(false)
+
+    // Нужен SourcePanelController'у, чтобы решить, показывать ли список хранимых процедур/функций —
+    // их разрешено копировать только между одинаковыми типами БД (см. SourcePanelController). Тип
+    // выбирается ДО фактического подключения/проверки, поэтому используем значение ComboBox
+    // напрямую, а не connectionConfig (которое появляется только после успешного testConnection()).
+    val dbType get() = form.dbTypeCombo.value
+
+    fun onDbTypeChanged(listener: (DbType) -> Unit) {
+        form.dbTypeCombo.valueProperty().addListener { _, _, newValue -> listener(newValue) }
+    }
 
     val view = VBox(
         8.0,

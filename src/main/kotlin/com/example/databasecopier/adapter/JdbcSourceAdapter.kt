@@ -138,6 +138,86 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
         return raw.substring(selectIdx).trim().trimEnd(';')
     }
 
+    override fun listRoutines(): List<RoutineRef> = withConnectionRetry {
+        val result = mutableListOf<RoutineRef>()
+        when (config.type) {
+            DbType.SQLITE -> {} // SQLite не поддерживает хранимые процедуры/функции вовсе
+            DbType.MYSQL ->
+                connection.createStatement().use { stmt ->
+                    stmt.executeQuery(
+                        "SELECT routine_name, routine_type FROM information_schema.routines WHERE routine_schema = '${config.database}'"
+                    ).use { rs ->
+                        while (rs.next()) {
+                            val kind = if (rs.getString("routine_type") == "FUNCTION") RoutineKind.FUNCTION else RoutineKind.PROCEDURE
+                            result.add(RoutineRef(rs.getString("routine_name"), kind))
+                        }
+                    }
+                }
+            // Postgres/MSSQL: по решению пользователя копируются только PROCEDURE, не FUNCTION —
+            // в этих диалектах процедуры и функции синтаксически и семантически расходятся сильнее,
+            // чем в MySQL (в Postgres, например, у функций и процедур разная семантика вызова —
+            // CALL vs SELECT/обычное выражение), так что унифицированный перенос обеих категорий
+            // не был бы такой же безопасной операцией, как для MySQL.
+            DbType.POSTGRESQL ->
+                connection.createStatement().use { stmt ->
+                    stmt.executeQuery(
+                        "SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace " +
+                            "WHERE n.nspname = 'public' AND p.prokind = 'p'"
+                    ).use { rs -> while (rs.next()) result.add(RoutineRef(rs.getString("proname"), RoutineKind.PROCEDURE)) }
+                }
+            DbType.SQLSERVER ->
+                connection.createStatement().use { stmt ->
+                    stmt.executeQuery("SELECT name FROM sys.objects WHERE type = 'P' AND is_ms_shipped = 0").use { rs ->
+                        while (rs.next()) result.add(RoutineRef(rs.getString("name"), RoutineKind.PROCEDURE))
+                    }
+                }
+        }
+        result
+    }
+
+    // MySQL включает DEFINER=`user`@`host` в текст, возвращаемый SHOW CREATE PROCEDURE/FUNCTION —
+    // если пользователь target-подключения не совпадает с этим definer'ом (обычный случай — разные
+    // среды/учётки на источнике и приёмнике) и/или не обладает SUPER-привилегией, CREATE падает с
+    // "Access denied; you need ... SUPER privilege(s) ... to perform this operation". DEFINER не
+    // несёт содержательного смысла при переносе в другую БД — вырезаем его, тогда MySQL сам
+    // подставит текущего пользователя target-соединения.
+    private val mysqlDefinerPattern = Regex("""DEFINER\s*=\s*`[^`]*`@`[^`]*`\s*""", RegexOption.IGNORE_CASE)
+
+    override fun getRoutineDefinition(routine: RoutineRef): String = withConnectionRetry {
+        when (config.type) {
+            DbType.MYSQL -> {
+                val showKeyword = if (routine.kind == RoutineKind.FUNCTION) "FUNCTION" else "PROCEDURE"
+                val columnName = if (routine.kind == RoutineKind.FUNCTION) "Create Function" else "Create Procedure"
+                connection.createStatement().use { stmt ->
+                    stmt.executeQuery("SHOW CREATE $showKeyword ${quote(routine.name)}").use { rs ->
+                        rs.next()
+                        mysqlDefinerPattern.replace(rs.getString(columnName), "")
+                    }
+                }
+            }
+            // pg_get_functiondef возвращает готовый "CREATE OR REPLACE PROCEDURE ... AS $$ ... $$
+            // LANGUAGE ..." целиком — в отличие от view, тело процедуры не нужно ни выделять, ни
+            // переупаковывать во что-то другое перед выполнением на target.
+            DbType.POSTGRESQL ->
+                connection.prepareStatement(
+                    "SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace " +
+                        "WHERE n.nspname = 'public' AND p.proname = ? AND p.prokind = 'p'"
+                ).use { ps ->
+                    ps.setString(1, routine.name)
+                    ps.executeQuery().use { rs -> rs.next(); rs.getString(1) }
+                }
+            DbType.SQLSERVER ->
+                connection.prepareStatement(
+                    "SELECT sm.definition FROM sys.sql_modules sm JOIN sys.objects o ON sm.object_id = o.object_id " +
+                        "WHERE o.name = ? AND o.type = 'P'"
+                ).use { ps ->
+                    ps.setString(1, routine.name)
+                    ps.executeQuery().use { rs -> rs.next(); rs.getString(1) }
+                }
+            DbType.SQLITE -> throw UnsupportedOperationException("SQLite does not support stored routines")
+        }
+    }
+
     override fun getTableStructure(table: String): TableStructure = withConnectionRetry {
         if (config.type == DbType.SQLITE) return@withConnectionRetry getSqliteTableStructure(table)
 

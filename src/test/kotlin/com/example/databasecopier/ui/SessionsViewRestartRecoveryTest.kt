@@ -1,6 +1,7 @@
 package com.example.databasecopier.ui
 
 import com.example.databasecopier.CopySessionTables
+import com.example.databasecopier.CopySessionRoutines
 import com.example.databasecopier.CopySessionViews
 import com.example.databasecopier.CopySessions
 import com.example.databasecopier.Connections
@@ -75,7 +76,7 @@ class SessionsViewRestartRecoveryTest {
         serviceDbFile = createTempFile("copier-restart-", ".sqlite").toFile()
         Database.connect("jdbc:sqlite:${serviceDbFile.absolutePath}", driver = "org.sqlite.JDBC")
         transaction {
-            SchemaUtils.createMissingTablesAndColumns(Connections, CopySessions, CopySessionTables, CopySessionViews)
+            SchemaUtils.createMissingTablesAndColumns(Connections, CopySessions, CopySessionTables, CopySessionViews, CopySessionRoutines)
         }
 
         sourceConfig = ConnectionConfig(

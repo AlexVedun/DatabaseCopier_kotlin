@@ -62,3 +62,15 @@ object CopySessionViews : Table("copy_session_views") {
 
     override val primaryKey = PrimaryKey(id)
 }
+
+object CopySessionRoutines : Table("copy_session_routines") {
+    val id = integer("id").autoIncrement()
+    val copySessionId = integer("copy_session_id").references(CopySessions.id)
+    val routineName = varchar("routine_name", 255)
+    val routineKind = varchar("routine_kind", 20) // procedure/function
+    // По умолчанию сняты — тот же принцип, что и у views.
+    val isSelected = bool("is_selected").default(false)
+    val status = varchar("status", 30).default("pending") // pending/done/manual_adaptation_required/failed
+
+    override val primaryKey = PrimaryKey(id)
+}
