@@ -4,7 +4,11 @@ import org.jetbrains.exposed.sql.Table
 
 object Connections : Table("connections") {
     val id = integer("id").autoIncrement()
-    val name = varchar("name", 255)
+    // Раньше каждое успешное "Проверить подключение" молча вставляло новую запись с именем
+    // "host:database" — без ограничения уникальности это привело к десяткам дублей одного и того
+    // же подключения. Теперь подключения именуются и управляются явно (см. ConnectionsView), имя —
+    // обязательный уникальный идентификатор, а не автогенерируемая метка.
+    val name = varchar("name", 255).uniqueIndex()
     val type = varchar("type", 20) // mysql / postgresql / sqlserver / sqlite
     val host = varchar("host", 255).nullable()
     val port = integer("port").nullable()

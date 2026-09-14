@@ -1,6 +1,7 @@
 package com.example.databasecopier
 
 import com.example.databasecopier.session.CopySessionRepository
+import com.example.databasecopier.ui.ConnectionsView
 import com.example.databasecopier.ui.CopyView
 import com.example.databasecopier.ui.LogViewerWindow
 import com.example.databasecopier.ui.SessionsView
@@ -19,7 +20,15 @@ class DatabaseCopierApp : Application() {
     // на передний план.
     private var logViewerWindow: LogViewerWindow? = null
 
+    // Текущий экран копирования (когда он показан, а не SessionsView) — нужен, чтобы после
+    // закрытия модального окна "Подключения" обновить в нём выпадающие списки подключений
+    // (см. showInitialScreen/refreshConnections).
+    private var currentCopyView: CopyView? = null
+
+    private lateinit var primaryStage: Stage
+
     override fun start(stage: Stage) {
+        primaryStage = stage
         initAppDatabase()
         CopySessionRepository.pauseAllRunningSessions()
 
@@ -50,19 +59,29 @@ class DatabaseCopierApp : Application() {
                 }
             }
         }
-        return MenuBar(Menu("Файл", null, logMenuItem))
+        val connectionsMenuItem = MenuItem("Подключения").apply {
+            setOnAction {
+                ConnectionsView(primaryStage).showAndWait()
+                // Окно модальное — showAndWait() возвращается только после его закрытия, список
+                // подключений к этому моменту мог измениться.
+                currentCopyView?.refreshConnections()
+            }
+        }
+        return MenuBar(Menu("Файл", null, connectionsMenuItem, logMenuItem))
     }
 
     private fun showInitialScreen(contentPane: BorderPane) {
         val resumable = CopySessionRepository.listResumable()
         if (resumable.isEmpty()) {
-            contentPane.center = CopyView().root
+            currentCopyView = CopyView().also { contentPane.center = it.root }
         } else {
+            currentCopyView = null
             contentPane.center = SessionsView(
                 onContinue = { id ->
-                    contentPane.center = CopyView(existingSessionId = id, onBackToSessions = { showInitialScreen(contentPane) }).root
+                    currentCopyView = CopyView(existingSessionId = id, onBackToSessions = { showInitialScreen(contentPane) })
+                        .also { contentPane.center = it.root }
                 },
-                onSkip = { contentPane.center = CopyView().root },
+                onSkip = { currentCopyView = CopyView().also { contentPane.center = it.root } },
             ).root
         }
     }

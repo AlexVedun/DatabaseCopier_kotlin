@@ -5,6 +5,9 @@ import com.example.databasecopier.CopySessionRoutines
 import com.example.databasecopier.CopySessionViews
 import com.example.databasecopier.CopySessions
 import com.example.databasecopier.Connections
+import com.example.databasecopier.adapter.ConnectionConfig
+import com.example.databasecopier.adapter.DbType
+import com.example.databasecopier.connection.ConnectionRepository
 import javafx.application.Platform
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
@@ -85,6 +88,32 @@ class CopyViewEndToEndTest {
 
     @Test
     fun `runs a full copy through the UI controllers end to end`() {
+        // Подключения теперь создаются заранее (см. ConnectionsView) и выбираются из выпадающего
+        // списка, а не вводятся прямо в форме — сохраняем их напрямую через репозиторий, как это
+        // делал бы диалог "Подключения" до открытия экрана копирования.
+        ConnectionRepository.save(
+            "mysql-source",
+            ConnectionConfig(
+                type = DbType.MYSQL,
+                host = mysql.host,
+                port = mysql.getMappedPort(3306),
+                database = mysql.databaseName,
+                username = mysql.username,
+                password = mysql.password,
+            ),
+        )
+        ConnectionRepository.save(
+            "postgres-target",
+            ConnectionConfig(
+                type = DbType.POSTGRESQL,
+                host = postgres.host,
+                port = postgres.getMappedPort(5432),
+                database = postgres.databaseName,
+                username = postgres.username,
+                password = postgres.password,
+            ),
+        )
+
         lateinit var view: CopyView
         val readyLatch = CountDownLatch(1)
         Platform.runLater {
@@ -93,28 +122,12 @@ class CopyViewEndToEndTest {
         }
         readyLatch.await()
 
-        fillConnectionForm(
-            form = getForm(view.sourcePanel),
-            type = com.example.databasecopier.adapter.DbType.MYSQL,
-            host = mysql.host,
-            port = mysql.getMappedPort(3306),
-            database = mysql.databaseName,
-            username = mysql.username,
-            password = mysql.password,
-        )
-        clickTestConnection(getForm(view.sourcePanel))
+        selectConnection(view.sourcePanel, "mysql-source")
+        clickTestConnection(view.sourcePanel)
         waitUntil { view.sourcePanel.connectedProperty.get() }
 
-        fillConnectionForm(
-            form = getForm(view.targetPanel),
-            type = com.example.databasecopier.adapter.DbType.POSTGRESQL,
-            host = postgres.host,
-            port = postgres.getMappedPort(5432),
-            database = postgres.databaseName,
-            username = postgres.username,
-            password = postgres.password,
-        )
-        clickTestConnection(getForm(view.targetPanel))
+        selectConnection(view.targetPanel, "postgres-target")
+        clickTestConnection(view.targetPanel)
         waitUntil { view.targetPanel.connectedProperty.get() }
 
         runOnFx { clickStartButton(view.progressPanel) }
@@ -146,36 +159,25 @@ class CopyViewEndToEndTest {
         }
     }
 
-    // --- вспомогательные функции для управления приватными полями контроллеров через reflection,
-    // т.к. в тесте эмулируется ввод пользователя в реальные JavaFX-поля формы. ---
+    // --- вспомогательные функции для управления приватным полем "picker" контроллеров через
+    // reflection, т.к. в тесте эмулируется выбор пользователя в реальном JavaFX ComboBox. ---
 
-    private fun getForm(controller: Any): ConnectionForm {
-        val field = controller.javaClass.getDeclaredField("form")
+    private fun getPicker(controller: Any): ConnectionPicker {
+        val field = controller.javaClass.getDeclaredField("picker")
         field.isAccessible = true
-        return field.get(controller) as ConnectionForm
+        return field.get(controller) as ConnectionPicker
     }
 
-    private fun fillConnectionForm(
-        form: ConnectionForm,
-        type: com.example.databasecopier.adapter.DbType,
-        host: String,
-        port: Int,
-        database: String,
-        username: String,
-        password: String,
-    ) {
+    private fun selectConnection(controller: Any, name: String) {
+        val picker = getPicker(controller)
         runOnFx {
-            form.dbTypeCombo.value = type
-            form.hostField.value = host
-            form.portField.value = port.toString()
-            form.databaseField.value = database
-            form.usernameField.value = username
-            form.passwordField.text = password
+            picker.combo.value = picker.combo.items.find { it.name == name }
+                ?: error("Connection '$name' not found among ${picker.combo.items.map { it.name }}")
         }
     }
 
-    private fun clickTestConnection(form: ConnectionForm) {
-        runOnFx { form.testButton.fire() }
+    private fun clickTestConnection(controller: Any) {
+        runOnFx { getPicker(controller).testButton.fire() }
     }
 
     private fun clickStartButton(progressPanel: ProgressPanelController) {

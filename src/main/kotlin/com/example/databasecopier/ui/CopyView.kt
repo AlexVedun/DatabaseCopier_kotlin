@@ -45,6 +45,13 @@ class CopyView(existingSessionId: Int? = null, onBackToSessions: (() -> Unit)? =
         }
     ).apply { isFitToWidth = true }
 
+    /** Вызывается снаружи (Main.kt) после закрытия окна "Подключения" — список подключений мог
+     *  измениться (создано/изменено/удалено), выпадающие списки на этом экране должны это отразить. */
+    fun refreshConnections() {
+        sourcePanel.refreshConnections()
+        targetPanel.refreshConnections()
+    }
+
     init {
         if (existingSessionId != null) {
             progressPanel.resumeSession(existingSessionId)

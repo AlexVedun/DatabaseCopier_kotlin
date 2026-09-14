@@ -5,6 +5,9 @@ import com.example.databasecopier.CopySessionRoutines
 import com.example.databasecopier.CopySessionViews
 import com.example.databasecopier.CopySessions
 import com.example.databasecopier.Connections
+import com.example.databasecopier.adapter.ConnectionConfig
+import com.example.databasecopier.adapter.DbType
+import com.example.databasecopier.connection.ConnectionRepository
 import com.example.databasecopier.dump.DumpDialect
 import javafx.application.Platform
 import javafx.scene.control.Button
@@ -85,6 +88,20 @@ class DumpCopyEndToEndTest {
 
     @Test
     fun `copies from a MySQL-dialect dump file into PostgreSQL through the UI controllers`() {
+        // Приёмник теперь выбирается из заранее сохранённого именованного подключения (см.
+        // ConnectionsView), а не вводится прямо в форме.
+        ConnectionRepository.save(
+            "postgres-target",
+            ConnectionConfig(
+                type = DbType.POSTGRESQL,
+                host = postgres.host,
+                port = postgres.getMappedPort(5432),
+                database = postgres.databaseName,
+                username = postgres.username,
+                password = postgres.password,
+            ),
+        )
+
         lateinit var view: CopyView
         val readyLatch = CountDownLatch(1)
         Platform.runLater {
@@ -101,16 +118,12 @@ class DumpCopyEndToEndTest {
         runOnFx { getPrivateField<Button>(view.sourcePanel, "loadDumpButton").fire() }
         waitUntil { view.sourcePanel.connectedProperty.get() }
 
-        fillConnectionForm(
-            form = getPrivateField(view.targetPanel, "form"),
-            type = com.example.databasecopier.adapter.DbType.POSTGRESQL,
-            host = postgres.host,
-            port = postgres.getMappedPort(5432),
-            database = postgres.databaseName,
-            username = postgres.username,
-            password = postgres.password,
-        )
-        runOnFx { getPrivateField<ConnectionForm>(view.targetPanel, "form").testButton.fire() }
+        val targetPicker = getPrivateField<ConnectionPicker>(view.targetPanel, "picker")
+        runOnFx {
+            targetPicker.combo.value = targetPicker.combo.items.find { it.name == "postgres-target" }
+                ?: error("Connection 'postgres-target' not found among ${targetPicker.combo.items.map { it.name }}")
+        }
+        runOnFx { targetPicker.testButton.fire() }
         waitUntil { view.targetPanel.connectedProperty.get() }
 
         runOnFx { getPrivateField<Button>(view.progressPanel, "startButton").fire() }
@@ -133,25 +146,6 @@ class DumpCopyEndToEndTest {
                     assertEquals(totalRows, rs.getInt(1))
                 }
             }
-        }
-    }
-
-    private fun fillConnectionForm(
-        form: ConnectionForm,
-        type: com.example.databasecopier.adapter.DbType,
-        host: String,
-        port: Int,
-        database: String,
-        username: String,
-        password: String,
-    ) {
-        runOnFx {
-            form.dbTypeCombo.value = type
-            form.hostField.value = host
-            form.portField.value = port.toString()
-            form.databaseField.value = database
-            form.usernameField.value = username
-            form.passwordField.text = password
         }
     }
 

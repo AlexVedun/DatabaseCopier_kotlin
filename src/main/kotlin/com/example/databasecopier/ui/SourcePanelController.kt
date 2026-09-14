@@ -1,12 +1,10 @@
 package com.example.databasecopier.ui
 
 import com.example.databasecopier.AppScope
-import com.example.databasecopier.adapter.ConnectionConfig
 import com.example.databasecopier.adapter.DbType
 import com.example.databasecopier.adapter.JdbcSourceAdapter
 import com.example.databasecopier.adapter.RoutineRef
 import com.example.databasecopier.adapter.SourceAdapter
-import com.example.databasecopier.connection.ConnectionRepository
 import com.example.databasecopier.dump.DumpDialect
 import com.example.databasecopier.dump.MysqlDumpSourceAdapter
 import com.example.databasecopier.dump.PostgresDumpSourceAdapter
@@ -35,7 +33,7 @@ import java.io.File
  */
 class SourcePanelController {
 
-    private val form = ConnectionForm()
+    private val picker = ConnectionPicker()
 
     private val modeGroup = ToggleGroup()
     private val connectionModeRadio = RadioButton("Подключение к БД").apply {
@@ -65,7 +63,7 @@ class SourcePanelController {
         HBox(8.0, loadDumpButton, dumpStatusLabel),
     ).apply { isVisible = false; isManaged = false }
 
-    private val connectionBox = VBox(form.row)
+    private val connectionBox = VBox(picker.row)
 
     private val tablesTable = TableView<TableSelection>().apply {
         isEditable = true
@@ -186,7 +184,7 @@ class SourcePanelController {
     ).apply { padding = Insets(8.0) }
 
     init {
-        form.testButton.setOnAction { testConnection() }
+        picker.testButton.setOnAction { testConnection() }
         modeGroup.selectedToggleProperty().addListener { _, _, newToggle ->
             val isDump = newToggle == dumpModeRadio
             connectionBox.isVisible = !isDump
@@ -212,6 +210,10 @@ class SourcePanelController {
     fun selectedRoutines(): List<RoutineRef> = routinesTable.items.filter { it.isSelected }.map { RoutineRef(it.name, it.kind) }
 
     fun currentSelection(): SourceSelection? = selection
+
+    /** Перечитывает список сохранённых подключений — вызывается после закрытия окна "Подключения"
+     *  (см. Main.kt), т.к. список мог измениться (создано/изменено/удалено подключение). */
+    fun refreshConnections() = picker.refresh()
 
     // Хранимые процедуры/функции разрешено копировать только между источником и приёмником одного
     // типа БД (см. комментарий у routinesTable) — источник-дамп их не индексирует вовсе (аналогично
@@ -243,16 +245,10 @@ class SourcePanelController {
     }
 
     private fun testConnection() {
-        val config = ConnectionConfig(
-            type = form.dbTypeCombo.value,
-            host = form.hostField.value,
-            port = form.portOrNull(),
-            database = form.databaseField.value ?: "",
-            username = form.usernameField.value,
-            password = form.passwordField.text,
-        )
-        form.testButton.isDisable = true
-        form.statusLabel.text = "Проверка..."
+        val record = picker.combo.value ?: return
+        val config = record.config
+        picker.testButton.isDisable = true
+        picker.statusLabel.text = "Проверка..."
 
         AppScope.scope.launch {
             val adapter = JdbcSourceAdapter(config)
@@ -261,26 +257,25 @@ class SourcePanelController {
                 val tables = adapter.listTables()
                 val views = adapter.listViews()
                 val routines = adapter.listRoutines()
-                val savedId = ConnectionRepository.save("${config.host}:${config.database}", config)
                 withContext(Dispatchers.Main) {
-                    selection = SourceSelection.Connection(config, savedId)
+                    selection = SourceSelection.Connection(config, record.id)
                     lastRowCounts = tables
                     lastRoutines = routines
                     tablesTable.items.setAll(tables.keys.sorted().map { TableSelection(it, true) })
                     viewsTable.items.setAll(views.sorted().map { TableSelection(it, false) })
                     refreshRoutinesVisibility()
-                    form.statusLabel.text = "Подключено. Таблиц: ${tables.size}"
+                    picker.statusLabel.text = "Подключено. Таблиц: ${tables.size}"
                     connectedProperty.set(true)
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
                     selection = null
                     connectedProperty.set(false)
-                    form.statusLabel.text = "Ошибка: ${e.message}"
+                    picker.statusLabel.text = "Ошибка: ${e.message}"
                 }
             } finally {
                 adapter.close()
-                withContext(Dispatchers.Main) { form.testButton.isDisable = false }
+                withContext(Dispatchers.Main) { picker.testButton.isDisable = false }
             }
         }
     }
