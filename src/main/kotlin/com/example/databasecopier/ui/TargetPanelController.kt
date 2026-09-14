@@ -4,6 +4,7 @@ import com.example.databasecopier.AppScope
 import com.example.databasecopier.adapter.ConnectionConfig
 import com.example.databasecopier.adapter.DbType
 import com.example.databasecopier.adapter.JdbcTargetAdapter
+import com.example.databasecopier.i18n.Messages
 import javafx.beans.property.SimpleBooleanProperty
 import javafx.geometry.Insets
 import javafx.scene.control.Label
@@ -22,8 +23,8 @@ class TargetPanelController {
     private val picker = ConnectionPicker()
 
     private val toggleGroup = ToggleGroup()
-    private val structureOnlyRadio = RadioButton("Только структура").apply { toggleGroup = this@TargetPanelController.toggleGroup }
-    private val structureAndDataRadio = RadioButton("Структура и данные").apply {
+    private val structureOnlyRadio = RadioButton(Messages.get("target.mode.structureOnly")).apply { toggleGroup = this@TargetPanelController.toggleGroup }
+    private val structureAndDataRadio = RadioButton(Messages.get("target.mode.structureAndData")).apply {
         toggleGroup = this@TargetPanelController.toggleGroup
         isSelected = true
     }
@@ -48,10 +49,10 @@ class TargetPanelController {
 
     val view = VBox(
         8.0,
-        Label("Результат копирования"),
+        Label(Messages.get("target.title")),
         picker.row,
         HBox(8.0, structureOnlyRadio, structureAndDataRadio),
-        HBox(8.0, Label("Размер батча:").apply { minWidth = 90.0 }, batchSizeSpinner),
+        HBox(8.0, Label(Messages.get("target.batchSize")).apply { minWidth = 90.0 }, batchSizeSpinner),
     ).apply { padding = Insets(8.0) }
 
     init {
@@ -70,7 +71,7 @@ class TargetPanelController {
         val record = picker.combo.value ?: return
         val config = record.config
         picker.testButton.isDisable = true
-        picker.statusLabel.text = "Проверка..."
+        picker.statusLabel.text = Messages.get("target.connecting")
 
         AppScope.scope.launch {
             val adapter = JdbcTargetAdapter(config)
@@ -79,7 +80,7 @@ class TargetPanelController {
                 withContext(Dispatchers.Main) {
                     connectionConfig = config
                     connectionId = record.id
-                    picker.statusLabel.text = "Подключено"
+                    picker.statusLabel.text = Messages.get("target.connected")
                     connectedProperty.set(true)
                 }
             } catch (e: Exception) {
@@ -87,7 +88,7 @@ class TargetPanelController {
                     connectionConfig = null
                     connectionId = null
                     connectedProperty.set(false)
-                    picker.statusLabel.text = "Ошибка: ${e.message}"
+                    picker.statusLabel.text = Messages.get("progress.error", e.message ?: "")
                 }
             } finally {
                 adapter.close()

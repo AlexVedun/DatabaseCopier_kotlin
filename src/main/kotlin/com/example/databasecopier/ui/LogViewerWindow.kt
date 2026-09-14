@@ -1,6 +1,7 @@
 package com.example.databasecopier.ui
 
 import com.example.databasecopier.getAppDataDir
+import com.example.databasecopier.i18n.Messages
 import javafx.animation.KeyFrame
 import javafx.animation.Timeline
 import javafx.geometry.Insets
@@ -57,9 +58,9 @@ class LogViewerWindow {
     private var lastReadPosition = 0L
 
     val stage: Stage = Stage().apply {
-        title = "Лог-файл приложения"
+        title = Messages.get("log.title")
 
-        val refreshButton = Button("Обновить").apply { setOnAction { refresh(force = true) } }
+        val refreshButton = Button(Messages.get("log.refresh")).apply { setOnAction { refresh(force = true) } }
         val toolbar = HBox(8.0, refreshButton, statusLabel).apply { padding = Insets(8.0) }
 
         val root = BorderPane().apply {
@@ -82,7 +83,7 @@ class LogViewerWindow {
         if (!logFile.exists()) {
             if (force) {
                 textArea.text = ""
-                statusLabel.text = "Лог-файл ещё не создан (${logFile.absolutePath})"
+                statusLabel.text = Messages.get("log.notCreatedYet", logFile.absolutePath)
             }
             return
         }
@@ -96,7 +97,7 @@ class LogViewerWindow {
             lastReadPosition = 0L
         }
         if (currentLength == lastReadPosition) {
-            statusLabel.text = "Обновлено: без изменений (${currentLength / 1024} КБ)"
+            statusLabel.text = Messages.get("log.unchanged", currentLength / 1024)
             return
         }
 
@@ -108,6 +109,6 @@ class LogViewerWindow {
             lastReadPosition = raf.length()
         }
         textArea.scrollTop = Double.MAX_VALUE
-        statusLabel.text = "Обновлено: ${lastReadPosition / 1024} КБ"
+        statusLabel.text = Messages.get("log.updated", lastReadPosition / 1024)
     }
 }

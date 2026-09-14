@@ -1,5 +1,6 @@
 package com.example.databasecopier.ui
 
+import com.example.databasecopier.i18n.Messages
 import com.example.databasecopier.session.CopySessionRecord
 import com.example.databasecopier.session.CopySessionRepository
 import javafx.geometry.Insets
@@ -26,15 +27,15 @@ class SessionsView(
     private val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm")
 
     private val table = TableView<CopySessionRecord>().apply {
-        val nameColumn = TableColumn<CopySessionRecord, String>("Имя").apply {
+        val nameColumn = TableColumn<CopySessionRecord, String>(Messages.get("sessions.column.name")).apply {
             cellValueFactory = Callback { javafx.beans.property.SimpleStringProperty(it.value.name) }
             prefWidth = 220.0
         }
-        val statusColumn = TableColumn<CopySessionRecord, String>("Статус").apply {
-            cellValueFactory = Callback { javafx.beans.property.SimpleStringProperty(it.value.status) }
+        val statusColumn = TableColumn<CopySessionRecord, String>(Messages.get("sessions.column.status")).apply {
+            cellValueFactory = Callback { javafx.beans.property.SimpleStringProperty(Messages.status(it.value.status)) }
             prefWidth = 100.0
         }
-        val updatedColumn = TableColumn<CopySessionRecord, String>("Обновлено").apply {
+        val updatedColumn = TableColumn<CopySessionRecord, String>(Messages.get("sessions.column.updated")).apply {
             cellValueFactory = Callback { javafx.beans.property.SimpleStringProperty(dateFormat.format(Date(it.value.updatedAt))) }
             prefWidth = 150.0
         }
@@ -42,12 +43,12 @@ class SessionsView(
             prefWidth = 220.0
             cellFactory = Callback {
                 object : TableCell<CopySessionRecord, Void>() {
-                    private val continueButton = Button("Продолжить").apply {
+                    private val continueButton = Button(Messages.get("sessions.continue")).apply {
                         setOnAction { onContinue(tableView.items[index].id) }
                     }
                     // "Закрыть" — чтобы неудачные/отменённые сессии не висели в списке
                     // "продолжаемых" вечно (listResumable() включает и status = "failed").
-                    private val closeButton = Button("Закрыть").apply {
+                    private val closeButton = Button(Messages.get("sessions.close")).apply {
                         setOnAction {
                             CopySessionRepository.updateSessionStatus(tableView.items[index].id, "cancelled")
                             // Явно квалифицируем this@SessionsView — иначе unqualified refresh()
@@ -69,13 +70,13 @@ class SessionsView(
         prefHeight = 300.0
     }
 
-    private val newSessionButton = Button("Новая сессия").apply {
+    private val newSessionButton = Button(Messages.get("sessions.newSession")).apply {
         setOnAction { onSkip() }
     }
 
     val root: Parent = VBox(
         8.0,
-        Label("Сохранённые сессии копирования"),
+        Label(Messages.get("sessions.title")),
         table,
         newSessionButton,
     ).apply { padding = Insets(8.0) }

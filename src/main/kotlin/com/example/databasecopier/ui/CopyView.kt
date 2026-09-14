@@ -1,5 +1,6 @@
 package com.example.databasecopier.ui
 
+import com.example.databasecopier.i18n.Messages
 import javafx.geometry.Insets
 import javafx.scene.Parent
 import javafx.scene.control.Button
@@ -27,9 +28,9 @@ class CopyView(existingSessionId: Int? = null, onBackToSessions: (() -> Unit)? =
         if (existingSessionId != null) {
             VBox(
                 8.0,
-                HBox(8.0, Label("Продолжение сессии #$existingSessionId")).apply {
+                HBox(8.0, Label(Messages.get("copyView.continuingSession", existingSessionId))).apply {
                     if (onBackToSessions != null) {
-                        children.add(Button("Назад к списку сессий").apply { setOnAction { onBackToSessions() } })
+                        children.add(Button(Messages.get("copyView.backToSessions")).apply { setOnAction { onBackToSessions() } })
                     }
                 },
                 progressPanel.view,

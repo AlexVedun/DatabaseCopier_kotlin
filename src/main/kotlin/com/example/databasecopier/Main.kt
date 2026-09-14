@@ -1,5 +1,7 @@
 package com.example.databasecopier
 
+import com.example.databasecopier.i18n.AppLanguage
+import com.example.databasecopier.i18n.Messages
 import com.example.databasecopier.session.CopySessionRepository
 import com.example.databasecopier.ui.ConnectionsView
 import com.example.databasecopier.ui.CopyView
@@ -7,11 +9,15 @@ import com.example.databasecopier.ui.LogViewerWindow
 import com.example.databasecopier.ui.SessionsView
 import javafx.application.Application
 import javafx.scene.Scene
+import javafx.scene.control.Alert
 import javafx.scene.control.Menu
 import javafx.scene.control.MenuBar
 import javafx.scene.control.MenuItem
+import javafx.scene.control.RadioMenuItem
+import javafx.scene.control.ToggleGroup
 import javafx.scene.layout.BorderPane
 import javafx.stage.Stage
+import java.util.Locale
 
 class DatabaseCopierApp : Application() {
 
@@ -48,7 +54,7 @@ class DatabaseCopierApp : Application() {
     }
 
     private fun buildMenuBar(): MenuBar {
-        val logMenuItem = MenuItem("Файл лога").apply {
+        val logMenuItem = MenuItem(Messages.get("menu.logFile")).apply {
             setOnAction {
                 val existing = logViewerWindow
                 if (existing != null && existing.stage.isShowing) {
@@ -59,7 +65,7 @@ class DatabaseCopierApp : Application() {
                 }
             }
         }
-        val connectionsMenuItem = MenuItem("Подключения").apply {
+        val connectionsMenuItem = MenuItem(Messages.get("menu.connections")).apply {
             setOnAction {
                 ConnectionsView(primaryStage).showAndWait()
                 // Окно модальное — showAndWait() возвращается только после его закрытия, список
@@ -67,7 +73,31 @@ class DatabaseCopierApp : Application() {
                 currentCopyView?.refreshConnections()
             }
         }
-        return MenuBar(Menu("Файл", null, connectionsMenuItem, logMenuItem))
+        val languageMenu = buildLanguageMenu()
+        return MenuBar(Menu(Messages.get("menu.file"), null, connectionsMenuItem, logMenuItem, languageMenu))
+    }
+
+    // Смена языка не перестраивает уже показанный экран на лету (это потребовало бы либо полной
+    // пересборки текущего CopyView/SessionsView с потерей несохранённого состояния формы вроде
+    // отмеченных чекбоксов таблиц, либо реактивного связывания каждой строки в UI с текущим
+    // языком) — вместо этого выбор сохраняется на диск и применяется при следующем запуске
+    // (см. Messages/main()), а пользователю сразу показывается подсказка об этом.
+    private fun buildLanguageMenu(): Menu {
+        val languageToggleGroup = ToggleGroup()
+        val items = AppLanguage.entries.map { language ->
+            RadioMenuItem(language.displayName).apply {
+                toggleGroup = languageToggleGroup
+                isSelected = language == Messages.current
+                setOnAction {
+                    Messages.setLanguage(language)
+                    Alert(Alert.AlertType.INFORMATION, Messages.get("language.restartMessage")).apply {
+                        title = Messages.get("language.restartTitle")
+                        headerText = null
+                    }.showAndWait()
+                }
+            }
+        }
+        return Menu(Messages.get("menu.language")).apply { this.items.addAll(items) }
     }
 
     private fun showInitialScreen(contentPane: BorderPane) {
@@ -91,5 +121,9 @@ fun main(args: Array<String>) {
     // Должно быть выставлено до первого обращения к SLF4J/logback где бы то ни было (включая
     // JDBC-драйверы) — конфигурация логгера читает эту system property один раз при инициализации.
     System.setProperty("APP_LOG_DIR", getAppDataDir().resolve("logs").absolutePath)
+    // Влияет на встроенные (не наши) элементы JavaFX, которые сами локализуются по Locale.default —
+    // например, текст кнопок ButtonType.YES/NO в Alert. Должно быть выставлено до первого создания
+    // любого такого элемента, поэтому до Application.launch, а не где-то внутри UI-кода.
+    Locale.setDefault(Messages.current.locale)
     Application.launch(DatabaseCopierApp::class.java, *args)
 }

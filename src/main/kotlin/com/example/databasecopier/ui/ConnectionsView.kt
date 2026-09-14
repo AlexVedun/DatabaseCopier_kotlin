@@ -2,6 +2,7 @@ package com.example.databasecopier.ui
 
 import com.example.databasecopier.connection.ConnectionRecord
 import com.example.databasecopier.connection.ConnectionRepository
+import com.example.databasecopier.i18n.Messages
 import javafx.beans.property.SimpleStringProperty
 import javafx.geometry.Insets
 import javafx.scene.Scene
@@ -29,11 +30,11 @@ class ConnectionsView(owner: Window?) {
         columnResizePolicy = TableView.CONSTRAINED_RESIZE_POLICY
         prefWidth = 640.0
         prefHeight = 320.0
-        val nameColumn = TableColumn<ConnectionRecord, String>("Название").apply {
+        val nameColumn = TableColumn<ConnectionRecord, String>(Messages.get("connections.column.name")).apply {
             cellValueFactory = Callback { SimpleStringProperty(it.value.name) }
             prefWidth = 160.0
         }
-        val typeColumn = TableColumn<ConnectionRecord, String>("Тип").apply {
+        val typeColumn = TableColumn<ConnectionRecord, String>(Messages.get("connections.column.type")).apply {
             cellValueFactory = Callback { SimpleStringProperty(it.value.config.type.name.lowercase()) }
             prefWidth = 90.0
         }
@@ -52,13 +53,13 @@ class ConnectionsView(owner: Window?) {
         columns.addAll(nameColumn, typeColumn, hostColumn, databaseColumn, usernameColumn)
     }
 
-    private val createButton = Button("Создать").apply { setOnAction { openCreateDialog() } }
-    private val editButton = Button("Изменить").apply { isDisable = true; setOnAction { openEditDialog() } }
-    private val duplicateButton = Button("Копировать").apply { isDisable = true; setOnAction { openDuplicateDialog() } }
-    private val deleteButton = Button("Удалить").apply { isDisable = true; setOnAction { deleteSelected() } }
+    private val createButton = Button(Messages.get("connections.create")).apply { setOnAction { openCreateDialog() } }
+    private val editButton = Button(Messages.get("connections.edit")).apply { isDisable = true; setOnAction { openEditDialog() } }
+    private val duplicateButton = Button(Messages.get("connections.duplicate")).apply { isDisable = true; setOnAction { openDuplicateDialog() } }
+    private val deleteButton = Button(Messages.get("connections.delete")).apply { isDisable = true; setOnAction { deleteSelected() } }
 
     private val stage = Stage().apply {
-        title = "Подключения"
+        title = Messages.get("connections.title")
         initModality(Modality.WINDOW_MODAL)
         if (owner != null) initOwner(owner)
     }
@@ -89,7 +90,7 @@ class ConnectionsView(owner: Window?) {
     }
 
     private fun openCreateDialog() {
-        ConnectionEditDialog(stage, "Новое подключение", "", null, excludingId = null) { name, config ->
+        ConnectionEditDialog(stage, Messages.get("connections.dialog.new"), "", null, excludingId = null) { name, config ->
             ConnectionRepository.save(name, config)
             refresh()
         }.showAndWait()
@@ -97,7 +98,7 @@ class ConnectionsView(owner: Window?) {
 
     private fun openEditDialog() {
         val record = table.selectionModel.selectedItem ?: return
-        ConnectionEditDialog(stage, "Изменить подключение", record.name, record.config, excludingId = record.id) { name, config ->
+        ConnectionEditDialog(stage, Messages.get("connections.dialog.edit"), record.name, record.config, excludingId = record.id) { name, config ->
             ConnectionRepository.update(record.id, name, config)
             refresh()
         }.showAndWait()
@@ -105,7 +106,7 @@ class ConnectionsView(owner: Window?) {
 
     private fun openDuplicateDialog() {
         val record = table.selectionModel.selectedItem ?: return
-        ConnectionEditDialog(stage, "Копия подключения \"${record.name}\"", "", record.config, excludingId = null) { name, config ->
+        ConnectionEditDialog(stage, Messages.get("connections.dialog.duplicate", record.name), "", record.config, excludingId = null) { name, config ->
             ConnectionRepository.save(name, config)
             refresh()
         }.showAndWait()
@@ -115,13 +116,12 @@ class ConnectionsView(owner: Window?) {
         val record = table.selectionModel.selectedItem ?: return
         val usageCount = ConnectionRepository.sessionsUsingCount(record.id)
         val message = if (usageCount > 0) {
-            "Подключение \"${record.name}\" используется в сохранённых сессиях ($usageCount шт.) — " +
-                "их станет невозможно возобновить. Удалить всё равно?"
+            Messages.get("connections.delete.confirmUsed", record.name, usageCount)
         } else {
-            "Удалить подключение \"${record.name}\"?"
+            Messages.get("connections.delete.confirm", record.name)
         }
         val alert = Alert(Alert.AlertType.CONFIRMATION, message, ButtonType.YES, ButtonType.NO)
-        alert.title = "Удаление подключения"
+        alert.title = Messages.get("connections.delete.title")
         alert.headerText = null
         alert.showAndWait().ifPresent { button ->
             if (button == ButtonType.YES) {

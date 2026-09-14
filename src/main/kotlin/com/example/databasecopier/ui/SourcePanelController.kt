@@ -6,6 +6,7 @@ import com.example.databasecopier.adapter.JdbcSourceAdapter
 import com.example.databasecopier.adapter.RoutineRef
 import com.example.databasecopier.adapter.SourceAdapter
 import com.example.databasecopier.dump.DumpDialect
+import com.example.databasecopier.i18n.Messages
 import com.example.databasecopier.dump.MysqlDumpSourceAdapter
 import com.example.databasecopier.dump.PostgresDumpSourceAdapter
 import javafx.beans.property.SimpleBooleanProperty
@@ -36,29 +37,29 @@ class SourcePanelController {
     private val picker = ConnectionPicker()
 
     private val modeGroup = ToggleGroup()
-    private val connectionModeRadio = RadioButton("Подключение к БД").apply {
+    private val connectionModeRadio = RadioButton(Messages.get("source.mode.connection")).apply {
         toggleGroup = modeGroup
         isSelected = true
     }
-    private val dumpModeRadio = RadioButton("SQL-дамп").apply { toggleGroup = modeGroup }
+    private val dumpModeRadio = RadioButton(Messages.get("source.mode.dump")).apply { toggleGroup = modeGroup }
 
     private val dialectCombo = ComboBox<DumpDialect>().apply {
         items.addAll(DumpDialect.MYSQL, DumpDialect.POSTGRESQL)
         value = DumpDialect.MYSQL
     }
     private var selectedDumpFile: File? = null
-    private val selectedFileLabel = Label("Файл не выбран")
-    private val chooseFileButton = Button("Выбрать файл дампа...").apply {
+    private val selectedFileLabel = Label(Messages.get("source.dump.noFileChosen"))
+    private val chooseFileButton = Button(Messages.get("source.dump.chooseFile")).apply {
         setOnAction { chooseDumpFile() }
     }
-    private val loadDumpButton = Button("Загрузить дамп").apply {
+    private val loadDumpButton = Button(Messages.get("source.dump.load")).apply {
         setOnAction { loadDump() }
     }
     private val dumpStatusLabel = Label()
 
     private val dumpBox = VBox(
         8.0,
-        HBox(8.0, Label("Диалект дампа:"), dialectCombo),
+        HBox(8.0, Label(Messages.get("source.dump.dialect")), dialectCombo),
         HBox(8.0, chooseFileButton, selectedFileLabel),
         HBox(8.0, loadDumpButton, dumpStatusLabel),
     ).apply { isVisible = false; isManaged = false }
@@ -79,17 +80,17 @@ class SourcePanelController {
             prefWidth = 40.0
             maxWidth = 40.0
         }
-        val nameColumn = TableColumn<TableSelection, String>("Таблица").apply {
+        val nameColumn = TableColumn<TableSelection, String>(Messages.get("source.column.table")).apply {
             cellValueFactory = javafx.util.Callback { it.value.nameProperty }
             prefWidth = 260.0
         }
         columns.addAll(selectedColumn, nameColumn)
     }
 
-    private val selectAllButton = Button("Выбрать все").apply {
+    private val selectAllButton = Button(Messages.get("source.selectAll")).apply {
         setOnAction { tablesTable.items.forEach { it.selectedProperty.set(true) } }
     }
-    private val selectNoneButton = Button("Снять все").apply {
+    private val selectNoneButton = Button(Messages.get("source.selectNone")).apply {
         setOnAction { tablesTable.items.forEach { it.selectedProperty.set(false) } }
     }
 
@@ -107,7 +108,7 @@ class SourcePanelController {
             prefWidth = 40.0
             maxWidth = 40.0
         }
-        val nameColumn = TableColumn<TableSelection, String>("View").apply {
+        val nameColumn = TableColumn<TableSelection, String>(Messages.get("source.column.view")).apply {
             cellValueFactory = javafx.util.Callback { it.value.nameProperty }
             prefWidth = 260.0
         }
@@ -132,11 +133,11 @@ class SourcePanelController {
             prefWidth = 40.0
             maxWidth = 40.0
         }
-        val nameColumn = TableColumn<RoutineSelection, String>("Процедура/функция").apply {
+        val nameColumn = TableColumn<RoutineSelection, String>(Messages.get("source.routines.column.name")).apply {
             cellValueFactory = javafx.util.Callback { it.value.nameProperty }
             prefWidth = 200.0
         }
-        val kindColumn = TableColumn<RoutineSelection, String>("Тип").apply {
+        val kindColumn = TableColumn<RoutineSelection, String>(Messages.get("source.routines.column.kind")).apply {
             cellValueFactory = javafx.util.Callback { it.value.kindProperty }
             prefWidth = 90.0
         }
@@ -171,15 +172,15 @@ class SourcePanelController {
         8.0,
         HBox(8.0, selectAllButton, selectNoneButton),
         tablesTable,
-        Label("Представления (views), необязательно:"),
+        Label(Messages.get("source.views.label")),
         viewsTable,
-        Label("Хранимые процедуры/функции, необязательно:"),
+        Label(Messages.get("source.routines.label")),
         routinesTable,
     ).apply { maxWidth = Double.MAX_VALUE }
 
     val view = VBox(
         8.0,
-        Label("Источник копирования"),
+        Label(Messages.get("source.title")),
         HBox(16.0, controlsColumn, tablesColumn).apply { HBox.setHgrow(tablesColumn, Priority.ALWAYS) },
     ).apply { padding = Insets(8.0) }
 
@@ -224,12 +225,11 @@ class SourcePanelController {
         val target = targetDbType
         if (sel is SourceSelection.Connection && target != null && sel.config.type == target) {
             routinesTable.items.setAll(lastRoutines.sortedBy { it.name }.map { RoutineSelection(it.name, it.kind, false) })
-            routinesTable.placeholder = Label("В источнике нет хранимых процедур/функций")
+            routinesTable.placeholder = Label(Messages.get("source.routines.empty"))
         } else {
             routinesTable.items.clear()
             routinesTable.placeholder = Label(
-                if (sel is SourceSelection.Connection) "Доступно только когда источник и приёмник — БД одного типа"
-                else "Недоступно для источника-дампа"
+                Messages.get(if (sel is SourceSelection.Connection) "source.routines.typeMismatch" else "source.routines.dumpUnavailable")
             )
         }
     }
@@ -248,7 +248,7 @@ class SourcePanelController {
         val record = picker.combo.value ?: return
         val config = record.config
         picker.testButton.isDisable = true
-        picker.statusLabel.text = "Проверка..."
+        picker.statusLabel.text = Messages.get("source.connecting")
 
         AppScope.scope.launch {
             val adapter = JdbcSourceAdapter(config)
@@ -264,14 +264,14 @@ class SourcePanelController {
                     tablesTable.items.setAll(tables.keys.sorted().map { TableSelection(it, true) })
                     viewsTable.items.setAll(views.sorted().map { TableSelection(it, false) })
                     refreshRoutinesVisibility()
-                    picker.statusLabel.text = "Подключено. Таблиц: ${tables.size}"
+                    picker.statusLabel.text = Messages.get("source.connected", tables.size)
                     connectedProperty.set(true)
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
                     selection = null
                     connectedProperty.set(false)
-                    picker.statusLabel.text = "Ошибка: ${e.message}"
+                    picker.statusLabel.text = Messages.get("source.error", e.message ?: "")
                 }
             } finally {
                 adapter.close()
@@ -282,7 +282,7 @@ class SourcePanelController {
 
     private fun chooseDumpFile() {
         val chooser = FileChooser().apply {
-            title = "Выбрать файл SQL-дампа"
+            title = Messages.get("source.dump.chooserTitle")
             extensionFilters.add(FileChooser.ExtensionFilter("SQL dump", "*.sql"))
         }
         val window = chooseFileButton.scene?.window
@@ -294,12 +294,12 @@ class SourcePanelController {
     private fun loadDump() {
         val file = selectedDumpFile
         if (file == null) {
-            dumpStatusLabel.text = "Сначала выберите файл"
+            dumpStatusLabel.text = Messages.get("source.dump.chooseFileFirst")
             return
         }
         val dialect = dialectCombo.value
         loadDumpButton.isDisable = true
-        dumpStatusLabel.text = "Разбор дампа..."
+        dumpStatusLabel.text = Messages.get("source.dump.parsing")
 
         AppScope.scope.launch {
             val adapter = when (dialect) {
@@ -317,14 +317,14 @@ class SourcePanelController {
                     // Парсер дампов не индексирует views/процедуры (Шаг 13) — список всегда пуст для дампов.
                     viewsTable.items.clear()
                     refreshRoutinesVisibility()
-                    dumpStatusLabel.text = "Разобрано. Таблиц: ${tables.size}"
+                    dumpStatusLabel.text = Messages.get("source.dump.parsed", tables.size)
                     connectedProperty.set(true)
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
                     selection = null
                     connectedProperty.set(false)
-                    dumpStatusLabel.text = "Ошибка: ${e.message}"
+                    dumpStatusLabel.text = Messages.get("source.error", e.message ?: "")
                 }
             } finally {
                 adapter.close()

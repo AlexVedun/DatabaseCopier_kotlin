@@ -3,6 +3,7 @@ package com.example.databasecopier.ui
 import com.example.databasecopier.adapter.ConnectionConfig
 import com.example.databasecopier.adapter.DbType
 import com.example.databasecopier.connection.ConnectionRepository
+import com.example.databasecopier.i18n.Messages
 import javafx.geometry.Insets
 import javafx.scene.Node
 import javafx.scene.Scene
@@ -51,7 +52,7 @@ class ConnectionEditDialog(
     private val portField = TextField(initialConfig?.port?.toString() ?: "").apply { prefWidth = FIELD_WIDTH }
     private val databaseField = TextField(initialConfig?.database ?: "").apply {
         prefWidth = FIELD_WIDTH
-        promptText = "для SQLite — путь к файлу"
+        promptText = Messages.get("connEdit.database.promptSqlite")
     }
     private val usernameField = TextField(initialConfig?.username ?: "").apply { prefWidth = FIELD_WIDTH }
     private val passwordField = PasswordField().apply {
@@ -67,17 +68,17 @@ class ConnectionEditDialog(
     }
 
     fun showAndWait() {
-        val saveButton = Button("Сохранить").apply { setOnAction { trySave() } }
-        val cancelButton = Button("Отмена").apply { setOnAction { stage.close() } }
+        val saveButton = Button(Messages.get("connEdit.save")).apply { setOnAction { trySave() } }
+        val cancelButton = Button(Messages.get("connEdit.cancel")).apply { setOnAction { stage.close() } }
         val root = VBox(
             8.0,
-            labeledRow("Название:", nameField),
-            labeledRow("Тип БД:", typeCombo),
-            labeledRow("Host:", hostField),
-            labeledRow("Port:", portField),
-            labeledRow("Database:", databaseField),
-            labeledRow("Username:", usernameField),
-            labeledRow("Password:", passwordField),
+            labeledRow(Messages.get("connEdit.name"), nameField),
+            labeledRow(Messages.get("connEdit.type"), typeCombo),
+            labeledRow(Messages.get("connEdit.host"), hostField),
+            labeledRow(Messages.get("connEdit.port"), portField),
+            labeledRow(Messages.get("connEdit.database"), databaseField),
+            labeledRow(Messages.get("connEdit.username"), usernameField),
+            labeledRow(Messages.get("connEdit.password"), passwordField),
             errorLabel,
             HBox(8.0, saveButton, cancelButton),
         ).apply { padding = Insets(12.0) }
@@ -91,11 +92,11 @@ class ConnectionEditDialog(
     private fun trySave() {
         val name = nameField.text?.trim().orEmpty()
         if (name.isEmpty()) {
-            errorLabel.text = "Введите название подключения"
+            errorLabel.text = Messages.get("connEdit.error.nameRequired")
             return
         }
         if (ConnectionRepository.isNameTaken(name, excludingId)) {
-            errorLabel.text = "Подключение с таким названием уже существует"
+            errorLabel.text = Messages.get("connEdit.error.nameTaken")
             return
         }
         val config = ConnectionConfig(

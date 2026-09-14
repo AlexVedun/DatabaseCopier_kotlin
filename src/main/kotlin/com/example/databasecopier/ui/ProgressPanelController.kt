@@ -11,6 +11,7 @@ import com.example.databasecopier.copy.CopyRunner
 import com.example.databasecopier.dump.DumpDialect
 import com.example.databasecopier.dump.MysqlDumpSourceAdapter
 import com.example.databasecopier.dump.PostgresDumpSourceAdapter
+import com.example.databasecopier.i18n.Messages
 import com.example.databasecopier.session.CopySessionRepository
 import javafx.geometry.Insets
 import javafx.scene.control.Alert
@@ -30,11 +31,11 @@ class ProgressPanelController(
     private val source: SourcePanelController,
     private val target: TargetPanelController,
 ) {
-    private val startButton = Button("Запустить")
-    private val pauseButton = Button("Приостановить").apply { isDisable = true }
-    private val cancelButton = Button("Отменить").apply { isDisable = true }
+    private val startButton = Button(Messages.get("progress.start"))
+    private val pauseButton = Button(Messages.get("progress.pause")).apply { isDisable = true }
+    private val cancelButton = Button(Messages.get("progress.cancel")).apply { isDisable = true }
 
-    private val overallLabel = Label("Сессия не запущена")
+    private val overallLabel = Label(Messages.get("progress.notStarted"))
     private val overallProgressBar = ProgressBar(0.0).apply { prefWidth = 300.0; maxWidth = Double.MAX_VALUE }
     private val tableLabel = Label("")
     private val tableProgressBar = ProgressBar(0.0).apply { prefWidth = 300.0; maxWidth = Double.MAX_VALUE }
@@ -48,7 +49,7 @@ class ProgressPanelController(
     // раздел "Прогресс" остаётся прижатым к "Результату копирования" вместо растяжения до края окна.
     val view = VBox(
         8.0,
-        Label("Прогресс"),
+        Label(Messages.get("progress.title")),
         HBox(8.0, startButton, pauseButton, cancelButton),
         overallLabel,
         overallProgressBar,
@@ -79,15 +80,15 @@ class ProgressPanelController(
         val tables = source.selectedTables()
 
         if (selection == null) {
-            showError("Сначала настройте источник (подключение или дамп)")
+            showError(Messages.get("progress.error.noSource"))
             return
         }
         if (targetConfig == null || targetConnId == null) {
-            showError("Сначала проверьте подключение приёмника")
+            showError(Messages.get("progress.error.noTarget"))
             return
         }
         if (tables.isEmpty()) {
-            showError("Выберите хотя бы одну таблицу для копирования")
+            showError(Messages.get("progress.error.noTables"))
             return
         }
 
@@ -124,7 +125,7 @@ class ProgressPanelController(
 
         val session = CopySessionRepository.getSession(id)
         if (session == null) {
-            showError("Сессия не найдена")
+            showError(Messages.get("progress.error.sessionNotFound"))
             return
         }
         val sourceAdapter: SourceAdapter = when (session.sourceType) {
@@ -132,7 +133,7 @@ class ProgressPanelController(
                 val connId = session.sourceConnectionId
                 val config = connId?.let { ConnectionRepository.load(it) }
                 if (config == null) {
-                    showError("Не удалось загрузить сохранённое подключение источника")
+                    showError(Messages.get("progress.error.sourceConnectionLoadFailed"))
                     return
                 }
                 JdbcSourceAdapter(config)
@@ -141,7 +142,7 @@ class ProgressPanelController(
                 val path = session.sourceDumpPath
                 val dialect = session.sourceDumpDialect?.let { runCatching { DumpDialect.valueOf(it.uppercase()) }.getOrNull() }
                 if (path == null || dialect == null) {
-                    showError("Не удалось восстановить параметры дампа для этой сессии")
+                    showError(Messages.get("progress.error.dumpRestoreFailed"))
                     return
                 }
                 val file = File(path)
@@ -151,13 +152,13 @@ class ProgressPanelController(
                 }
             }
             else -> {
-                showError("Неизвестный тип источника: ${session.sourceType}")
+                showError(Messages.get("progress.error.unknownSourceType", session.sourceType))
                 return
             }
         }
         val targetConfig = ConnectionRepository.load(session.targetConnectionId)
         if (targetConfig == null) {
-            showError("Не удалось загрузить сохранённое подключение приёмника")
+            showError(Messages.get("progress.error.targetConnectionLoadFailed"))
             return
         }
         val totalTables = CopySessionRepository.getTables(id).count { it.isSelected }
@@ -172,7 +173,7 @@ class ProgressPanelController(
         startButton.isDisable = true
         pauseButton.isDisable = false
         cancelButton.isDisable = false
-        overallLabel.text = "Копирование: 0 из $totalTables таблиц"
+        overallLabel.text = Messages.get("progress.tablesProgress", 0, totalTables)
         overallProgressBar.progress = 0.0
         tableProgressBar.progress = 0.0
         errorLabel.text = ""
@@ -185,11 +186,11 @@ class ProgressPanelController(
         AppScope.scope.launch {
             val targetAdapter = JdbcTargetAdapter(targetConfig)
             try {
-                withContext(Dispatchers.Main) { overallLabel.text = "Подключение к источнику..." }
+                withContext(Dispatchers.Main) { overallLabel.text = Messages.get("progress.connectingSource") }
                 sourceAdapter.connect()
-                withContext(Dispatchers.Main) { overallLabel.text = "Подключение к приёмнику..." }
+                withContext(Dispatchers.Main) { overallLabel.text = Messages.get("progress.connectingTarget") }
                 targetAdapter.connect()
-                withContext(Dispatchers.Main) { overallLabel.text = "Копирование: 0 из $totalTables таблиц" }
+                withContext(Dispatchers.Main) { overallLabel.text = Messages.get("progress.tablesProgress", 0, totalTables) }
                 runner.run(id, sourceAdapter, targetAdapter)
             } catch (e: Exception) {
                 // connect() выполняется здесь, а не внутри CopyRunner.run — без этого catch сбой
@@ -216,13 +217,13 @@ class ProgressPanelController(
         sessionId?.let { CopySessionRepository.updateSessionStatus(it, "cancelled") }
         pauseButton.isDisable = true
         cancelButton.isDisable = true
-        overallLabel.text = "Сессия отменена"
+        overallLabel.text = Messages.get("progress.sessionCancelled")
         errorLabel.text = ""
     }
 
     private fun onProgress(event: CopyProgressEvent, totalTables: Int) {
         val done = CopySessionRepository.getTables(event.sessionId).count { it.status == "done" }
-        overallLabel.text = "Копирование: $done из $totalTables таблиц"
+        overallLabel.text = Messages.get("progress.tablesProgress", done, totalTables)
         overallProgressBar.progress = if (totalTables > 0) done.toDouble() / totalTables else 0.0
 
         // FK/views — отдельные проходы ПОСЛЕ того, как все таблицы уже в статусе "done" (см.
@@ -232,16 +233,15 @@ class ProgressPanelController(
         // этих проходов видел бы застывшую на последней скопированной таблице полоску без единого
         // намёка на то, сколько ещё осталось — так и был обнаружен этот пробел.
         val phaseLabel = when (event.phase) {
-            "foreign_keys" -> "Внешние ключи"
-            "views" -> "Представления"
-            "routines" -> "Процедуры/функции"
+            "foreign_keys", "views", "routines" -> Messages.get("progress.phase.${event.phase}")
             else -> null
         }
         if (phaseLabel != null) {
-            tableLabel.text = "$phaseLabel: ${event.rowsCopied} из ${event.rowsTotal} (${event.tableName})"
+            tableLabel.text = Messages.get("progress.phaseProgress", phaseLabel, event.rowsCopied, event.rowsTotal ?: 0L, event.tableName)
         } else {
-            tableLabel.text = "${event.tableName}: ${event.rowsCopied}" +
-                (event.rowsTotal?.let { " из $it" } ?: " строк")
+            tableLabel.text = event.rowsTotal?.let {
+                Messages.get("progress.rows.withTotal", event.tableName, event.rowsCopied, it)
+            } ?: Messages.get("progress.rows.withoutTotal", event.tableName, event.rowsCopied)
         }
         // progress = -1.0 (JavaFX "indeterminate") рисуется как непрерывно бегающая туда-сюда
         // анимированная полоска — из-за постоянной перерисовки это грузит CPU почти на 100% на
@@ -260,12 +260,12 @@ class ProgressPanelController(
         // "Отменить" остаётся доступна после failed/paused — иначе с упавшей сессией нельзя было
         // сделать вообще ничего, кроме бесконечных попыток "Запустить" заново.
         cancelButton.isDisable = session?.status !in setOf("failed", "paused")
-        overallLabel.text = "Сессия завершена со статусом: ${session?.status}"
+        overallLabel.text = Messages.get("progress.sessionFinished", session?.status?.let { Messages.status(it) } ?: "")
         if (session?.status == "completed") {
             overallProgressBar.progress = 1.0
             tableProgressBar.progress = 1.0
         }
-        errorLabel.text = if (session?.status == "failed") "Ошибка: ${session.lastError}" else ""
+        errorLabel.text = if (session?.status == "failed") Messages.get("progress.error", session.lastError ?: "") else ""
     }
 
     private fun showError(message: String) {
