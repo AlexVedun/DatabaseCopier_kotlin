@@ -2,6 +2,13 @@ package com.example.databasecopier.adapter
 
 interface TargetAdapter {
     fun connect()
+    /** Подготавливает существующую схему к пересозданию [tablesToRecreate].
+     *
+     * Для SQL Server это отдельный обязательный шаг: NOCHECK отключает проверку данных, но не
+     * позволяет удалить таблицу, на которую всё ещё ссылается FOREIGN KEY. [selectedTables]
+     * нужен, чтобы не удалить связь, принадлежащую невыбранной таблице.
+     */
+    fun prepareTableRecreation(selectedTables: Set<String>, tablesToRecreate: Set<String>)
     fun createTable(structure: TableStructure)
     fun createForeignKeys(table: String, foreignKeys: List<ForeignKeyRef>)
     /** Индексы и CHECK-ограничения создаются здесь, а не в createTable() — после загрузки данных

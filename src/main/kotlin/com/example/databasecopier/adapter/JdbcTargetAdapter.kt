@@ -6,6 +6,7 @@ import java.sql.DriverManager
 import java.sql.SQLException
 import java.sql.Statement
 import java.security.MessageDigest
+import java.util.Locale
 
 class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
 
@@ -22,6 +23,75 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
             log.info("Приёмник {} ({}:{}/{}) — подключено за {} мс", config.type, config.host, config.port, config.database, System.currentTimeMillis() - start)
         } catch (e: Exception) {
             log.error("Приёмник {} ({}:{}/{}) — подключение не удалось за {} мс: {}", config.type, config.host, config.port, config.database, System.currentTimeMillis() - start, e.message)
+            throw e
+        }
+    }
+
+    override fun prepareTableRecreation(selectedTables: Set<String>, tablesToRecreate: Set<String>) {
+        if (config.type != DbType.SQLSERVER || tablesToRecreate.isEmpty()) return
+
+        val selected = selectedTables.mapTo(mutableSetOf()) { it.lowercase(Locale.ROOT) }
+        val recreating = tablesToRecreate.mapTo(mutableSetOf()) { it.lowercase(Locale.ROOT) }
+        val dependencies = mutableListOf<SqlServerForeignKeyDependency>()
+
+        connection.createStatement().use { stmt ->
+            stmt.executeQuery(
+                "SELECT fk.name AS fk_name, " +
+                    "child_schema.name AS child_schema, child_table.name AS child_table, " +
+                    "referenced_schema.name AS referenced_schema, referenced_table.name AS referenced_table " +
+                    "FROM sys.foreign_keys fk " +
+                    "JOIN sys.tables child_table ON child_table.object_id = fk.parent_object_id " +
+                    "JOIN sys.schemas child_schema ON child_schema.schema_id = child_table.schema_id " +
+                    "JOIN sys.tables referenced_table ON referenced_table.object_id = fk.referenced_object_id " +
+                    "JOIN sys.schemas referenced_schema ON referenced_schema.schema_id = referenced_table.schema_id"
+            ).use { rs ->
+                while (rs.next()) {
+                    val dependency = SqlServerForeignKeyDependency(
+                        name = rs.getString("fk_name"),
+                        childSchema = rs.getString("child_schema"),
+                        childTable = rs.getString("child_table"),
+                        referencedSchema = rs.getString("referenced_schema"),
+                        referencedTable = rs.getString("referenced_table"),
+                    )
+                    if (
+                        dependency.referencedSchema.equals("dbo", ignoreCase = true) &&
+                        dependency.referencedTable.lowercase(Locale.ROOT) in recreating
+                    ) {
+                        dependencies += dependency
+                    }
+                }
+            }
+        }
+
+        // Сначала проверяем ВСЕ зависимости и только потом меняем схему. Иначе при первой же
+        // ссылке из невыбранной таблицы часть FK выбранных таблиц уже могла бы быть удалена.
+        val externalDependencies = dependencies.filter {
+            !it.childSchema.equals("dbo", ignoreCase = true) ||
+                it.childTable.lowercase(Locale.ROOT) !in selected
+        }
+        if (externalDependencies.isNotEmpty()) {
+            val details = externalDependencies.joinToString { dependency ->
+                "${dependency.childSchema}.${dependency.childTable}.${dependency.name} -> " +
+                    "${dependency.referencedSchema}.${dependency.referencedTable}"
+            }
+            throw SQLException(
+                "Нельзя пересоздать выбранные таблицы: на них ссылаются внешние ключи " +
+                    "невыбранных таблиц: $details. Добавьте эти таблицы в копирование или удалите зависимости вручную."
+            )
+        }
+
+        try {
+            for (dependency in dependencies) {
+                connection.createStatement().use { stmt ->
+                    stmt.execute(
+                        "ALTER TABLE ${quote(dependency.childSchema)}.${quote(dependency.childTable)} " +
+                            "DROP CONSTRAINT ${quote(dependency.name)}"
+                    )
+                }
+            }
+            connection.commit()
+        } catch (e: Exception) {
+            connection.rollback()
             throw e
         }
     }
@@ -53,7 +123,13 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
             // и создаётся заново по структуре источника (решение зафиксировано с пользователем:
             // не пытаться угадывать совместимость существующей схемы, а гарантировать, что
             // структура target всегда точно соответствует source).
-            stmt.execute("DROP TABLE IF EXISTS ${quote(structure.name)}")
+            // PostgreSQL, в отличие от MySQL с FOREIGN_KEY_CHECKS=0, не разрешает
+            // DROP таблицы, на которую ссылаются FK, даже при session_replication_role=replica.
+            // CASCADE удаляет только зависящие объекты (в данном случае FK), а не
+            // сами ссылающиеся таблицы; FK выбранных таблиц затем создаются заново
+            // отдельным проходом CopyRunner.
+            val cascade = if (config.type == DbType.POSTGRESQL) " CASCADE" else ""
+            stmt.execute("DROP TABLE IF EXISTS ${quote(structure.name)}$cascade")
             stmt.execute("CREATE TABLE ${quote(structure.name)} ($columnsSql$pkSql)$tableCommentSql")
         }
         connection.commit()
@@ -569,6 +645,14 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
         DbType.POSTGRESQL, DbType.SQLITE -> "\"$identifier\""
         DbType.SQLSERVER -> "[$identifier]"
     }
+
+    private data class SqlServerForeignKeyDependency(
+        val name: String,
+        val childSchema: String,
+        val childTable: String,
+        val referencedSchema: String,
+        val referencedTable: String,
+    )
 
     override fun close() {
         if (::connection.isInitialized) connection.close()

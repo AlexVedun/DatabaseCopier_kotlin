@@ -3,6 +3,7 @@ package com.example.databasecopier.adapter
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.BeforeEach
@@ -86,6 +87,42 @@ abstract class JdbcAdapterTestBase {
         // Фикстура не задаёт ON DELETE/ON UPDATE явно — все СУБД по умолчанию считают это NO ACTION.
         assertEquals(ReferentialAction.NO_ACTION, fks[0].onDelete)
         assertEquals(ReferentialAction.NO_ACTION, fks[0].onUpdate)
+    }
+
+    @Test
+    fun `recreates a PostgreSQL table referenced by an existing foreign key`() {
+        assumeTrue(config().type == DbType.POSTGRESQL)
+
+        // orders.customer_id ссылается на customers.id и воспроизводит случай,
+        // когда при повторном копировании родительская таблица обрабатывается первой.
+        target.createTable(source.getTableStructure("customers"))
+
+        assertTrue(target.tableExists("customers"))
+        assertTrue(target.tableExists("orders"), "CASCADE must remove the FK, not the referencing table")
+    }
+
+    @Test
+    fun `prepares SQL Server tables by dropping only selected foreign key dependencies`() {
+        assumeTrue(config().type == DbType.SQLSERVER)
+
+        val error = assertThrows(java.sql.SQLException::class.java) {
+            target.prepareTableRecreation(
+                selectedTables = setOf("customers"),
+                tablesToRecreate = setOf("customers"),
+            )
+        }
+        assertTrue(error.message!!.contains("orders"))
+        assertEquals(1, source.getForeignKeys("orders").size, "validation must not drop any FK")
+
+        target.prepareTableRecreation(
+            selectedTables = setOf("customers", "orders"),
+            tablesToRecreate = setOf("customers", "orders"),
+        )
+        target.createTable(source.getTableStructure("customers"))
+
+        assertTrue(target.tableExists("customers"))
+        assertTrue(target.tableExists("orders"), "preparation must remove the FK, not the referencing table")
+        assertTrue(source.getForeignKeys("orders").isEmpty(), "the old FK must be removed before recreation")
     }
 
     @Test

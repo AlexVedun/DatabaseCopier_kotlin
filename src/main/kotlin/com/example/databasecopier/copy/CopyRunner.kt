@@ -41,6 +41,13 @@ class CopyRunner {
             val pending = allSelected.filter { it.status != "done" && it.status != "skipped" }
             log.info("Сессия {}: к копированию осталось {} из {} таблиц", sessionId, pending.size, allSelected.size)
 
+            val selectedNames = allSelected.map { it.tableName }.toSet()
+            val tablesToRecreate = pending.filter { !it.structureCopied }.map { it.tableName }.toSet()
+            if (tablesToRecreate.isNotEmpty()) {
+                log.debug("Сессия {}: подготавливаю {} таблиц к пересозданию", sessionId, tablesToRecreate.size)
+                target.prepareTableRecreation(selectedNames, tablesToRecreate)
+            }
+
             // FK-проверки отключаются на весь оставшийся ход сессии (переживает паузу/возобновление —
             // включаются обратно только по успешном завершении всей сессии, см. Шаг 4/9 инструкции).
             log.debug("Сессия {}: отключаю проверку внешних ключей на приёмнике", sessionId)
@@ -101,7 +108,6 @@ class CopyRunner {
             // таблицы на всё время этого прохода, не давая понять, сколько ещё осталось.
             val fkPending = allSelected.filter { !it.foreignKeysCopied }
             log.info("Сессия {}: прохожу внешние ключи для {} таблиц", sessionId, fkPending.size)
-            val selectedNames = allSelected.map { it.tableName }.toSet()
             for ((index, table) in fkPending.withIndex()) {
                 if (!isRunnable(sessionId)) {
                     log.info("Сессия {}: остановлена перед внешними ключами таблицы {}", sessionId, table.tableName)
