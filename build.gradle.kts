@@ -55,6 +55,9 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
+    // JNA/SQLite load native libraries in tests. JDK 25 warns that this access will be blocked in
+    // a future release unless it is explicitly enabled for classpath (unnamed-module) code.
+    jvmArgs("--enable-native-access=ALL-UNNAMED")
     // Docker Engine 29.x на этой машине отклоняет старую версию Docker API (1.32), которую
     // testcontainers/docker-java по умолчанию использует при первичной проверке доступности
     // демона — принудительно используем более новую версию API.
@@ -132,13 +135,13 @@ fun jpackageCommonArgs(type: String, destination: File): List<String> = listOf(
     "--dest", destination.absolutePath,
 ) + jpackageRuntimeArgs()
 
-val prepareJpackageInput by tasks.registering(Sync::class) {
+val prepareJpackageInput = tasks.register<Sync>("prepareJpackageInput") {
     dependsOn(tasks.shadowJar)
     from(tasks.shadowJar)
     into(jpackageInputDir)
 }
 
-val jpackageAppImage by tasks.registering(Exec::class) {
+val jpackageAppImage = tasks.register<Exec>("jpackageAppImage") {
     group = "distribution"
     description = "Собирает самодостаточный app-image (Linux) через jpackage"
     dependsOn(prepareJpackageInput)
@@ -157,7 +160,7 @@ val jpackageAppImage by tasks.registering(Exec::class) {
     commandLine(*jpackageCommonArgs("app-image", outputDir.get().asFile).toTypedArray())
 }
 
-val windowsExe by tasks.registering(Exec::class) {
+val windowsExe = tasks.register<Exec>("windowsExe") {
     group = "distribution"
     description = "Собирает установщик Windows (.exe) через jpackage"
     dependsOn(prepareJpackageInput)
@@ -179,7 +182,7 @@ val windowsExe by tasks.registering(Exec::class) {
     )
 }
 
-val macDmg by tasks.registering(Exec::class) {
+val macDmg = tasks.register<Exec>("macDmg") {
     group = "distribution"
     description = "Собирает установочный образ macOS (.dmg) через jpackage"
     dependsOn(prepareJpackageInput)
@@ -203,7 +206,7 @@ val macDmg by tasks.registering(Exec::class) {
 // packaging/appimage/) и собираем его в настоящий однофайловый .AppImage через appimagetool.
 val appImageDir = layout.buildDirectory.dir("AppDir")
 
-val prepareAppDir by tasks.registering(Sync::class) {
+val prepareAppDir = tasks.register<Sync>("prepareAppDir") {
     group = "distribution"
     description = "Собирает AppDir (jpackage app-image + AppRun/.desktop/иконка) для appimagetool"
     dependsOn(jpackageAppImage)
@@ -234,7 +237,7 @@ val prepareAppDir by tasks.registering(Sync::class) {
     }
 }
 
-val appImage by tasks.registering(Exec::class) {
+val appImage = tasks.register<Exec>("appImage") {
     group = "distribution"
     description = "Собирает однофайловый .AppImage (Linux) из AppDir через appimagetool"
     dependsOn(prepareAppDir)

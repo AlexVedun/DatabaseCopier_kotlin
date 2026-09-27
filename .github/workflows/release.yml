@@ -46,7 +46,9 @@ jobs:
           java-version: 25
           cache: gradle
       - name: Run test suite
-        run: ./gradlew test --no-daemon
+        # JavaFX UI tests need a display. GitHub's Ubuntu image includes Xvfb, so run the whole
+        # suite inside a virtual X11 server instead of skipping the end-to-end UI coverage.
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" ./gradlew test --no-daemon
 
   linux:
     name: Linux AppImage
