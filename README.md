@@ -85,7 +85,7 @@ the current JDK as the runtime.
 ### GitHub releases
 
 The `.github/workflows/release.yml` workflow runs the full test suite and builds
-all three native packages on Linux, Windows and Intel macOS runners. Publishing
+all three native packages on Linux, Windows and Apple Silicon macOS runners. Publishing
 a GitHub Release with a numeric tag such as `v1.2.3` starts the workflow and
 attaches the `.AppImage`, `.exe` and `.dmg` files to that release.
 

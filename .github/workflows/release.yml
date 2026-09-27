@@ -112,9 +112,9 @@ jobs:
           if-no-files-found: error
 
   macos:
-    name: macOS DMG (Intel)
+    name: macOS DMG (Apple Silicon)
     needs: [version, test]
-    runs-on: macos-15-intel
+    runs-on: macos-15
     env:
       APP_VERSION: ${{ needs.version.outputs.value }}
     steps:
@@ -129,7 +129,7 @@ jobs:
         run: ./gradlew macDmg --no-daemon -PappVersion="$APP_VERSION" -PfullRuntime=false
       - uses: actions/upload-artifact@v4
         with:
-          name: database-copier-macos-x86_64
+          name: database-copier-macos-arm64
           path: build/installer/macos/*.dmg
           if-no-files-found: error
 
