@@ -139,6 +139,17 @@ fun jpackageRuntimeArgs(): List<String> = if (useFullRuntime.get()) {
     )
 }
 
+fun verifyJpackageRuntime() {
+    if (!useFullRuntime.get()) {
+        val jmodsDirectory = file(System.getProperty("java.home")).resolve("jmods")
+        check(jmodsDirectory.isDirectory) {
+            "Compact runtime packaging requires a JDK with JMOD files at $jmodsDirectory. " +
+                "For Temurin 24+ use actions/setup-java with java-package: jdk+jmods, " +
+                "or pass -PfullRuntime=true to package the current runtime."
+        }
+    }
+}
+
 fun jpackageCommonArgs(type: String, destination: File): List<String> = listOf(
     "jpackage",
     "--type", type,
@@ -170,6 +181,7 @@ val jpackageAppImage = tasks.register<Exec>("jpackageAppImage") {
     // запуске, что ломает appImage при каждом втором ./gradlew appImage подряд.
     doFirst {
         check(isLinux) { "Задачу appImage необходимо запускать на Linux" }
+        verifyJpackageRuntime()
         delete(outputDir)
         outputDir.get().asFile.mkdirs()
     }
@@ -185,6 +197,7 @@ val windowsExe = tasks.register<Exec>("windowsExe") {
     val outputDir = layout.buildDirectory.dir("installer/windows")
     doFirst {
         check(isWindows) { "Задачу windowsExe необходимо запускать на Windows" }
+        verifyJpackageRuntime()
         delete(outputDir)
         outputDir.get().asFile.mkdirs()
     }
@@ -207,6 +220,7 @@ val macDmg = tasks.register<Exec>("macDmg") {
     val outputDir = layout.buildDirectory.dir("installer/macos")
     doFirst {
         check(isMacOs) { "Задачу macDmg необходимо запускать на macOS" }
+        verifyJpackageRuntime()
         delete(outputDir)
         outputDir.get().asFile.mkdirs()
     }
