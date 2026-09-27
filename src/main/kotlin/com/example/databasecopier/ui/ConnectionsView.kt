@@ -27,7 +27,7 @@ import javafx.util.Callback
 class ConnectionsView(owner: Window?) {
 
     private val table = TableView<ConnectionRecord>().apply {
-        columnResizePolicy = TableView.CONSTRAINED_RESIZE_POLICY
+        columnResizePolicy = TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN
         prefWidth = 640.0
         prefHeight = 320.0
         val nameColumn = TableColumn<ConnectionRecord, String>(Messages.get("connections.column.name")).apply {

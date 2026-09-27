@@ -248,7 +248,7 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
                         DbType.MYSQL -> rs.getString("extra")?.contains("auto_increment", ignoreCase = true) == true
                         DbType.POSTGRESQL -> rawDefault?.startsWith("nextval(") == true
                         DbType.SQLSERVER -> name in identityColumns
-                        else -> false
+                        DbType.SQLITE -> false
                     }
                     columns.add(
                         ColumnDef(
@@ -723,20 +723,17 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
             return cache[table] ?: emptyList()
         }
 
-        val sql = when (config.type) {
-            DbType.POSTGRESQL ->
-                "SELECT kcu.column_name, ccu.table_name AS referenced_table, ccu.column_name AS referenced_column, " +
-                    "rc.delete_rule AS on_delete, rc.update_rule AS on_update " +
-                    "FROM information_schema.table_constraints tc " +
-                    "JOIN information_schema.key_column_usage kcu " +
-                    "  ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema " +
-                    "JOIN information_schema.constraint_column_usage ccu " +
-                    "  ON tc.constraint_name = ccu.constraint_name AND tc.table_schema = ccu.table_schema " +
-                    "JOIN information_schema.referential_constraints rc " +
-                    "  ON tc.constraint_name = rc.constraint_name AND tc.table_schema = rc.constraint_schema " +
-                    "WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_name = ? AND ${schemaClause("tc")}"
-            else -> throw UnsupportedOperationException("getForeignKeys not implemented yet for ${config.type}")
-        }
+        // Остальные варианты завершились выше, поэтому здесь тип уже сужен до PostgreSQL.
+        val sql = "SELECT kcu.column_name, ccu.table_name AS referenced_table, ccu.column_name AS referenced_column, " +
+            "rc.delete_rule AS on_delete, rc.update_rule AS on_update " +
+            "FROM information_schema.table_constraints tc " +
+            "JOIN information_schema.key_column_usage kcu " +
+            "  ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema " +
+            "JOIN information_schema.constraint_column_usage ccu " +
+            "  ON tc.constraint_name = ccu.constraint_name AND tc.table_schema = ccu.table_schema " +
+            "JOIN information_schema.referential_constraints rc " +
+            "  ON tc.constraint_name = rc.constraint_name AND tc.table_schema = rc.constraint_schema " +
+            "WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_name = ? AND ${schemaClause("tc")}"
         val result = mutableListOf<ForeignKeyRef>()
         connection.prepareStatement(sql).use { ps ->
             ps.setString(1, table)

@@ -48,6 +48,10 @@ jobs:
       - name: Run test suite
         # JavaFX UI tests need a display. GitHub's Ubuntu image includes Xvfb, so run the whole
         # suite inside a virtual X11 server instead of skipping the end-to-end UI coverage.
+        env:
+          # The headless runner has no desktop accessibility D-Bus service. Disable only the GTK
+          # accessibility bridge in CI to avoid a harmless AT-SPI ServiceUnknown warning.
+          NO_AT_BRIDGE: "1"
         run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" ./gradlew test --no-daemon
 
   linux:

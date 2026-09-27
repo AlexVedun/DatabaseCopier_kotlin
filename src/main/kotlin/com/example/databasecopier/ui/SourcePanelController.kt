@@ -70,9 +70,9 @@ class SourcePanelController {
         isEditable = true
         prefHeight = 100.0
         maxWidth = Double.MAX_VALUE
-        // CONSTRAINED_RESIZE_POLICY растягивает колонки на всю ширину TableView, а не только
-        // саму таблицу на всю ширину окна — иначе справа от "Таблица" осталась бы пустая полоса.
-        columnResizePolicy = TableView.CONSTRAINED_RESIZE_POLICY
+        // CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN растягивает колонки на всю ширину TableView,
+        // а не только саму таблицу на всю ширину окна — иначе справа осталась бы пустая полоса.
+        columnResizePolicy = TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN
         val selectedColumn = TableColumn<TableSelection, Boolean>("").apply {
             cellValueFactory = javafx.util.Callback { it.value.selectedProperty }
             cellFactory = CheckBoxTableCell.forTableColumn(this)
@@ -100,7 +100,7 @@ class SourcePanelController {
         isEditable = true
         prefHeight = 100.0
         maxWidth = Double.MAX_VALUE
-        columnResizePolicy = TableView.CONSTRAINED_RESIZE_POLICY
+        columnResizePolicy = TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN
         val selectedColumn = TableColumn<TableSelection, Boolean>("").apply {
             cellValueFactory = javafx.util.Callback { it.value.selectedProperty }
             cellFactory = CheckBoxTableCell.forTableColumn(this)
@@ -125,7 +125,7 @@ class SourcePanelController {
         isEditable = true
         prefHeight = 100.0
         maxWidth = Double.MAX_VALUE
-        columnResizePolicy = TableView.CONSTRAINED_RESIZE_POLICY
+        columnResizePolicy = TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN
         val selectedColumn = TableColumn<RoutineSelection, Boolean>("").apply {
             cellValueFactory = javafx.util.Callback { it.value.selectedProperty }
             cellFactory = CheckBoxTableCell.forTableColumn(this)

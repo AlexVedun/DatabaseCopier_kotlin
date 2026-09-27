@@ -1,6 +1,5 @@
 plugins {
-    kotlin("jvm") version "2.1.20"
-    id("org.openjfx.javafxplugin") version "0.1.0"
+    kotlin("jvm") version "2.4.20"
     id("com.gradleup.shadow") version "9.6.1"
     application
 }
@@ -10,17 +9,34 @@ group = "com.example"
 // остаётся воспроизводимой и использует текущую версию проекта по умолчанию.
 version = providers.gradleProperty("appVersion").orElse("1.1.1").get()
 
+val osName = System.getProperty("os.name").lowercase()
+val isLinux = osName.contains("linux")
+val isWindows = osName.contains("windows")
+val isMacOs = osName.contains("mac")
+val architecture = System.getProperty("os.arch").lowercase()
+val isArm64 = architecture == "aarch64" || architecture == "arm64"
+val javafxPlatform = when {
+    isLinux && isArm64 -> "linux-aarch64"
+    isLinux -> "linux"
+    isWindows && isArm64 -> "win-aarch64"
+    isWindows -> "win"
+    isMacOs && isArm64 -> "mac-aarch64"
+    isMacOs -> "mac"
+    else -> error("Unsupported operating system for JavaFX: ${System.getProperty("os.name")}")
+}
+
 repositories {
     mavenCentral()
 }
 
-javafx {
-    version = "25"
-    modules = listOf("javafx.controls", "javafx.fxml")
-}
-
 dependencies {
-    // JavaFX (managed by plugin)
+    // OpenJFX содержит нативные библиотеки, поэтому release workflow собирает fat-jar отдельно
+    // на каждой целевой ОС. Явный classifier гарантирует выбор библиотек нужной платформы.
+    val javafxVersion = "25"
+    implementation("org.openjfx:javafx-base:$javafxVersion:$javafxPlatform")
+    implementation("org.openjfx:javafx-graphics:$javafxVersion:$javafxPlatform")
+    implementation("org.openjfx:javafx-controls:$javafxVersion:$javafxPlatform")
+    implementation("org.openjfx:javafx-fxml:$javafxVersion:$javafxPlatform")
 
     // Kotlin coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
@@ -80,8 +96,8 @@ tasks.withType<JavaCompile> {
 
 // Шаг 14: упаковка через jpackage в самодостаточный app-image (встроенный JRE, не требует
 // установленного JDK на машине пользователя). shadowJar собирает один fat-jar со всеми
-// зависимостями (включая JavaFX-модули текущей платформы, которые javafx-плагин уже подключил
-// как обычные classpath-зависимости) — jpackage поддерживает только классический classpath-запуск
+// зависимостями (включая JavaFX-модули текущей платформы, выбранные classifier-зависимостями)
+// — jpackage поддерживает только классический classpath-запуск
 // (--main-jar/--main-class), не модульный, поэтому JPMS module-info здесь не нужен.
 // Каждый JDBC-драйвер регистрирует себя через META-INF/services/java.sql.Driver — по умолчанию
 // shadowJar при слиянии jar'ов берёт только один такой файл (последний по порядку), из-за чего
@@ -91,6 +107,11 @@ tasks.shadowJar {
     // Shadow 9 по умолчанию исключает дубликаты ещё до transformers. Для service descriptors
     // это оставило бы в fat-jar только один JDBC-драйвер вместо объединения всех провайдеров.
     duplicatesStrategy = DuplicatesStrategy.INCLUDE
+    // Несколько зависимостей содержат одноимённый общий LICENSE.txt. В итоговом архиве достаточно
+    // первого экземпляра; локальное правило не мешает mergeServiceFiles() ниже.
+    filesMatching("META-INF/LICENSE.txt") {
+        duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    }
     mergeServiceFiles()
 }
 
@@ -98,10 +119,6 @@ val jpackageInputDir = layout.buildDirectory.dir("jpackage-input")
 val packageName = "database-copier"
 val packageVendor = "Database Copier"
 val packageDescription = "Copy database structure and data between different DBMS engines"
-val osName = System.getProperty("os.name").lowercase()
-val isLinux = osName.contains("linux")
-val isWindows = osName.contains("windows")
-val isMacOs = osName.contains("mac")
 
 // На обычных Temurin-сборках jpackage сам создаёт компактный runtime через jlink. Локальный
 // Red Hat JDK изменяет java.security системной crypto policy, из-за чего jlink отказывается

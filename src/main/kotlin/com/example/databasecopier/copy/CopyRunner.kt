@@ -208,7 +208,8 @@ class CopyRunner {
                 if (autoIncrementColumn != null) {
                     for (row in batch.rows) {
                         val value = (row[autoIncrementColumn] as? Number)?.toLong() ?: continue
-                        if (maxAutoIncrementValue == null || value > maxAutoIncrementValue!!) maxAutoIncrementValue = value
+                        val currentMaximum = maxAutoIncrementValue
+                        if (currentMaximum == null || value > currentMaximum) maxAutoIncrementValue = value
                     }
                 }
             }
@@ -227,8 +228,8 @@ class CopyRunner {
         // каждом батче), иначе новые строки, вставленные в target вручную между батчами, рискуют
         // получить PK, конфликтующий с ещё не скопированными строками источника.
         log.info("Сессия {}: таблица {} — данные скопированы полностью, всего строк={}", sessionId, current.tableName, current.rowsCopied)
-        if (autoIncrementColumn != null && maxAutoIncrementValue != null) {
-            target.syncAutoIncrement(current.tableName, autoIncrementColumn, maxAutoIncrementValue!!)
+        if (autoIncrementColumn != null) {
+            maxAutoIncrementValue?.let { target.syncAutoIncrement(current.tableName, autoIncrementColumn, it) }
         }
 
         CopySessionRepository.markDataCopied(current.id)
