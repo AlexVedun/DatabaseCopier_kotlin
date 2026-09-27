@@ -1,12 +1,14 @@
 plugins {
     kotlin("jvm") version "2.1.20"
     id("org.openjfx.javafxplugin") version "0.1.0"
-    id("com.gradleup.shadow") version "8.3.5"
+    id("com.gradleup.shadow") version "9.6.1"
     application
 }
 
 group = "com.example"
-version = "1.1.1"
+// GitHub Actions передаёт версию из release-тега через -PappVersion. Обычная локальная сборка
+// остаётся воспроизводимой и использует текущую версию проекта по умолчанию.
+version = providers.gradleProperty("appVersion").orElse("1.1.1").get()
 
 repositories {
     mavenCentral()
@@ -83,10 +85,52 @@ tasks.withType<JavaCompile> {
 // ServiceLoader/DriverManager видит только один драйвер, а не все четыре. mergeServiceFiles()
 // вместо перезаписи объединяет содержимое одноимённых файлов META-INF/services/* из всех jar'ов.
 tasks.shadowJar {
+    // Shadow 9 по умолчанию исключает дубликаты ещё до transformers. Для service descriptors
+    // это оставило бы в fat-jar только один JDBC-драйвер вместо объединения всех провайдеров.
+    duplicatesStrategy = DuplicatesStrategy.INCLUDE
     mergeServiceFiles()
 }
 
 val jpackageInputDir = layout.buildDirectory.dir("jpackage-input")
+val packageName = "database-copier"
+val packageVendor = "Database Copier"
+val packageDescription = "Copy database structure and data between different DBMS engines"
+val osName = System.getProperty("os.name").lowercase()
+val isLinux = osName.contains("linux")
+val isWindows = osName.contains("windows")
+val isMacOs = osName.contains("mac")
+
+// На обычных Temurin-сборках jpackage сам создаёт компактный runtime через jlink. Локальный
+// Red Hat JDK изменяет java.security системной crypto policy, из-за чего jlink отказывается
+// работать; для него сохраняем проверенный fallback с полным runtime. Поведение можно явно
+// переопределить через -PfullRuntime=true/false.
+val useFullRuntime = providers.gradleProperty("fullRuntime")
+    .map(String::toBoolean)
+    .orElse(System.getProperty("java.vendor").contains("Red Hat", ignoreCase = true))
+
+fun jpackageRuntimeArgs(): List<String> = if (useFullRuntime.get()) {
+    listOf("--runtime-image", System.getProperty("java.home"))
+} else {
+    // Начиная с JDK 25 jpackage больше не передаёт --bind-services в jlink автоматически.
+    // JDBC и crypto providers используют ServiceLoader, поэтому сохраняем service bindings.
+    listOf(
+        "--jlink-options",
+        "--strip-native-commands --strip-debug --no-man-pages --no-header-files --bind-services",
+    )
+}
+
+fun jpackageCommonArgs(type: String, destination: File): List<String> = listOf(
+    "jpackage",
+    "--type", type,
+    "--name", packageName,
+    "--app-version", project.version.toString(),
+    "--vendor", packageVendor,
+    "--description", packageDescription,
+    "--input", jpackageInputDir.get().asFile.absolutePath,
+    "--main-jar", tasks.shadowJar.get().archiveFileName.get(),
+    "--main-class", "com.example.databasecopier.MainKt",
+    "--dest", destination.absolutePath,
+) + jpackageRuntimeArgs()
 
 val prepareJpackageInput by tasks.registering(Sync::class) {
     dependsOn(tasks.shadowJar)
@@ -99,32 +143,58 @@ val jpackageAppImage by tasks.registering(Exec::class) {
     description = "Собирает самодостаточный app-image (Linux) через jpackage"
     dependsOn(prepareJpackageInput)
 
-    val outputDir = layout.buildDirectory.dir("jpackage")
-    val mainJarName = tasks.shadowJar.get().archiveFileName.get()
+    val outputDir = layout.buildDirectory.dir("jpackage/linux")
 
     // jpackage отказывается писать в уже существующий "<dest>/<name>" (падает с "Application
     // destination directory ... already exists") — без очистки задача несостоятельна при повторном
     // запуске, что ломает appImage при каждом втором ./gradlew appImage подряд.
     doFirst {
-        delete(outputDir.get().dir("database-copier"))
+        check(isLinux) { "Задачу appImage необходимо запускать на Linux" }
+        delete(outputDir)
+        outputDir.get().asFile.mkdirs()
+    }
+
+    commandLine(*jpackageCommonArgs("app-image", outputDir.get().asFile).toTypedArray())
+}
+
+val windowsExe by tasks.registering(Exec::class) {
+    group = "distribution"
+    description = "Собирает установщик Windows (.exe) через jpackage"
+    dependsOn(prepareJpackageInput)
+
+    val outputDir = layout.buildDirectory.dir("installer/windows")
+    doFirst {
+        check(isWindows) { "Задачу windowsExe необходимо запускать на Windows" }
+        delete(outputDir)
         outputDir.get().asFile.mkdirs()
     }
 
     commandLine(
-        "jpackage",
-        "--type", "app-image",
-        "--name", "database-copier",
-        "--app-version", project.version.toString(),
-        "--input", jpackageInputDir.get().asFile.absolutePath,
-        "--main-jar", mainJarName,
-        "--main-class", "com.example.databasecopier.MainKt",
-        "--dest", outputDir.get().asFile.absolutePath,
-        // Без --runtime-image jpackage сам вызывает jlink, чтобы собрать урезанный runtime — на
-        // сборках OpenJDK от Fedora/Red Hat это падает с "java.security has been modified"
-        // (постустановочный скрипт правит java.security для system-wide crypto policy, из-за чего
-        // jlink не может создать кастомный образ). Переиспользуем полный JDK текущей сборки как
-        // готовый runtime-image — app-image получается крупнее, зато не зависит от этого багфикса.
-        "--runtime-image", System.getProperty("java.home"),
+        *(jpackageCommonArgs("exe", outputDir.get().asFile) + listOf(
+            "--win-dir-chooser",
+            "--win-menu",
+            "--win-menu-group", packageVendor,
+            "--win-shortcut",
+        )).toTypedArray()
+    )
+}
+
+val macDmg by tasks.registering(Exec::class) {
+    group = "distribution"
+    description = "Собирает установочный образ macOS (.dmg) через jpackage"
+    dependsOn(prepareJpackageInput)
+
+    val outputDir = layout.buildDirectory.dir("installer/macos")
+    doFirst {
+        check(isMacOs) { "Задачу macDmg необходимо запускать на macOS" }
+        delete(outputDir)
+        outputDir.get().asFile.mkdirs()
+    }
+
+    commandLine(
+        *(jpackageCommonArgs("dmg", outputDir.get().asFile) + listOf(
+            "--mac-package-identifier", "com.example.databasecopier",
+        )).toTypedArray()
     )
 }
 
@@ -138,7 +208,7 @@ val prepareAppDir by tasks.registering(Sync::class) {
     description = "Собирает AppDir (jpackage app-image + AppRun/.desktop/иконка) для appimagetool"
     dependsOn(jpackageAppImage)
 
-    from(layout.buildDirectory.dir("jpackage/database-copier"))
+    from(layout.buildDirectory.dir("jpackage/linux/database-copier"))
     from("packaging/appimage") {
         include("AppRun", "database-copier.desktop", "database-copier.png")
     }
@@ -178,6 +248,7 @@ val appImage by tasks.registering(Exec::class) {
     val outputFile = outputDir.get().file("database-copier-${project.version}-x86_64.AppImage")
 
     doFirst {
+        check(isLinux) { "Задачу appImage необходимо запускать на Linux" }
         outputDir.get().asFile.mkdirs()
         check(File(appimagetoolPath).exists()) {
             "appimagetool не найден по пути $appimagetoolPath — передайте -PappimagetoolPath=<путь>"

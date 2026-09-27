@@ -47,21 +47,51 @@ Run the test suite (unit + Testcontainers-based integration tests):
 ./gradlew test
 ```
 
-## Packaging (Linux AppImage)
+## Native packaging
+
+Native packages must be built on their target operating system. All packages are
+self-contained and include a Java runtime.
+
+Linux AppImage:
 
 ```bash
 ./gradlew appImage
 ```
 
-This builds a self-contained `.AppImage` (bundled JRE, no separate JDK
-required on the target machine) at:
+Windows installer (run on Windows with WiX Toolset 3 installed):
+
+```powershell
+.\gradlew.bat windowsExe
+```
+
+macOS disk image (run on macOS):
+
+```bash
+./gradlew macDmg
+```
+
+The generated packages are written to:
 
 ```
-build/appimage/database-copier-1.0.0-x86_64.AppImage
+build/appimage/database-copier-<version>-x86_64.AppImage
+build/installer/windows/database-copier-<version>.exe
+build/installer/macos/database-copier-<version>.dmg
 ```
 
-The app cannot be repackaged while a previously built instance is still
-running, since the running instance keeps the AppImage's squashfs mount open.
+Override the package version with `-PappVersion=1.2.3`. On JDK distributions
+where `jlink` cannot create a runtime image, use `-PfullRuntime=true` to bundle
+the current JDK as the runtime.
+
+### GitHub releases
+
+The `.github/workflows/release.yml` workflow runs the full test suite and builds
+all three native packages on Linux, Windows and Intel macOS runners. Publishing
+a GitHub Release with a numeric tag such as `v1.2.3` starts the workflow and
+attaches the `.AppImage`, `.exe` and `.dmg` files to that release.
+
+The workflow can also be started manually from the Actions tab. A manual run
+stores the packages as workflow artifacts but does not create or modify a
+GitHub Release.
 
 ## Project layout
 
