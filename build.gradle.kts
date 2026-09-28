@@ -7,7 +7,7 @@ plugins {
 group = "com.example"
 // GitHub Actions передаёт версию из release-тега через -PappVersion. Обычная локальная сборка
 // остаётся воспроизводимой и использует текущую версию проекта по умолчанию.
-version = providers.gradleProperty("appVersion").orElse("1.1.1").get()
+version = providers.gradleProperty("appVersion").orElse("1.2.0").get()
 
 val osName = System.getProperty("os.name").lowercase()
 val isLinux = osName.contains("linux")
