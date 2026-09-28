@@ -1,7 +1,9 @@
 [Desktop Entry]
 Type=Application
 Name=Database Copier
+Comment=Copy database structure and data between different DBMS engines
 Exec=AppRun
 Icon=database-copier
 Categories=Utility;
 Terminal=false
+X-AppImage-Version=${appVersion}

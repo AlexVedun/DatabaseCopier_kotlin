@@ -244,7 +244,11 @@ val prepareAppDir = tasks.register<Sync>("prepareAppDir") {
 
     from(layout.buildDirectory.dir("jpackage/linux/database-copier"))
     from("packaging/appimage") {
-        include("AppRun", "database-copier.desktop", "database-copier.png")
+        include("AppRun", "database-copier.png")
+    }
+    from("packaging/appimage") {
+        include("database-copier.desktop")
+        expand("appVersion" to project.version.toString())
     }
     into(appImageDir)
 
