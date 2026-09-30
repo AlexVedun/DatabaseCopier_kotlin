@@ -3,7 +3,7 @@ package com.example.databasecopier.dump
 object InsertParser {
 
     private val HEADER_REGEX = Regex(
-        """(?is)^insert\s+into\s+[`"]?([\w]+)[`"]?\s*(?:\(([^)]*)\))?\s*values\s*"""
+        """(?is)^insert\s+into\s+[`"]?([\p{L}\p{N}_$]+)[`"]?\s*(?:\(([^)]*)\))?\s*values\s*"""
     )
 
     data class Result(val tableName: String, val columns: List<String>?, val rows: List<List<Any?>>)

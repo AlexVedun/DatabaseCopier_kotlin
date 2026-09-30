@@ -4,7 +4,7 @@ package com.example.databasecopier.dump
 object CopyBlockParser {
 
     private val HEADER_REGEX = Regex(
-        """(?is)^copy\s+[`"]?([\w]+)[`"]?\s*(?:\(([^)]*)\))?\s*from\s+stdin"""
+        """(?is)^copy\s+[`"]?([\p{L}\p{N}_$]+)[`"]?\s*(?:\(([^)]*)\))?\s*from\s+stdin"""
     )
 
     const val TERMINATOR = "\\."

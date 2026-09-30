@@ -89,6 +89,13 @@ class DumpParserFixtureTest {
         assertNull(row2[2])
     }
 
+    @Test
+    fun `parses Unicode table names in INSERT and COPY headers`() {
+        val table = "категорії"
+        assertEquals(table, InsertParser.parse("INSERT INTO `$table` VALUES (1);", true).tableName)
+        assertEquals(table, CopyBlockParser.parseHeader("COPY \"$table\" (id) FROM stdin;")?.tableName)
+    }
+
     private data class ForeignKeyRefFixture(val column: String, val refTable: String, val refColumn: String)
     private fun com.example.databasecopier.adapter.ForeignKeyRef.toFixture() =
         ForeignKeyRefFixture(columnName, referencedTable, referencedColumn)

@@ -16,6 +16,37 @@ class DumpSourceAdapterTest {
     }
 
     @Test
+    fun `keeps Unicode column names in MySQL dump structure keys and rows`() {
+        // The c in this identifier is Cyrillic, as in the reported mysqldump.
+        val id = "gt\u0441_goal_template_category_id"
+        val parentId = "gt\u0441_parent_id"
+        val table = "app_gtc_goal_template_category"
+        val sql = """
+            CREATE TABLE `$table` (
+              `$id` int(11) NOT NULL AUTO_INCREMENT,
+              `$parentId` int(11) DEFAULT NULL,
+              `gtc_name` varchar(255) NOT NULL,
+              PRIMARY KEY (`$id`),
+              CONSTRAINT `fk_category_parent` FOREIGN KEY (`$parentId`) REFERENCES `$table` (`$id`)
+            );
+            INSERT INTO `$table` VALUES (1,NULL,'Шаблон1');
+        """.trimIndent()
+
+        val adapter = MysqlDumpSourceAdapter(writeFixture(sql))
+        adapter.connect()
+        try {
+            val structure = adapter.getTableStructure(table)
+            assertEquals(listOf(id, parentId, "gtc_name"), structure.columns.map { it.name })
+            assertEquals(listOf(id), structure.primaryKey)
+            assertEquals(parentId, adapter.getForeignKeys(table).single().columnName)
+            assertEquals(id, adapter.getForeignKeys(table).single().referencedColumn)
+            assertEquals(mapOf(id to 1L, parentId to null, "gtc_name" to "Шаблон1"), adapter.readBatch(table, null, 10).rows.single())
+        } finally {
+            adapter.close()
+        }
+    }
+
+    @Test
     fun `reads structure, foreign keys and paginates INSERT-format MySQL dump without duplicates`() {
         val sql = """
             -- MySQL dump 10.13  Distrib 8.0.36

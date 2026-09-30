@@ -8,13 +8,16 @@ import com.example.databasecopier.adapter.TypeMapper
 
 object CreateTableParser {
 
-    private val NAME_REGEX = Regex("""(?is)create\s+table\s+(?:if\s+not\s+exists\s+)?[`"]?([\w]+)[`"]?\s*\(""")
-    private val COLUMN_NAME_TYPE_REGEX = Regex("""^[`"]?([\w]+)[`"]?\s+([\w]+)(?:\s*\(([^)]*)\))?""")
+    // Java's default \w is ASCII-only. MySQL allows Unicode identifiers, including names whose
+    // Cyrillic letters look identical to Latin ones; skipping such a column breaks its PRIMARY KEY.
+    private val IDENTIFIER = """[\p{L}\p{N}_$]+"""
+    private val NAME_REGEX = Regex("""(?is)create\s+table\s+(?:if\s+not\s+exists\s+)?[`"]?($IDENTIFIER)[`"]?\s*\(""")
+    private val COLUMN_NAME_TYPE_REGEX = Regex("""^[`"]?($IDENTIFIER)[`"]?\s+([\w]+)(?:\s*\(([^)]*)\))?""")
     // Только для VARCHAR/CHAR "(N)" — это длина строки; у DECIMAL/NUMERIC "(N,M)" это
     // точность/масштаб, а не длина, поэтому не трогаем при наличии запятой.
     private val VARCHAR_LENGTH_REGEX = Regex("""^\d+$""")
     private val FK_REGEX = Regex(
-        """(?is)FOREIGN\s+KEY\s*\(\s*[`"]?([\w]+)[`"]?\s*\)\s*REFERENCES\s+[`"]?([\w]+)[`"]?\s*\(\s*[`"]?([\w]+)[`"]?\s*\)""" +
+        """(?is)FOREIGN\s+KEY\s*\(\s*[`"]?($IDENTIFIER)[`"]?\s*\)\s*REFERENCES\s+[`"]?($IDENTIFIER)[`"]?\s*\(\s*[`"]?($IDENTIFIER)[`"]?\s*\)""" +
             """(?:\s*ON\s+DELETE\s+(CASCADE|SET\s+NULL|RESTRICT|NO\s+ACTION|SET\s+DEFAULT))?""" +
             """(?:\s*ON\s+UPDATE\s+(CASCADE|SET\s+NULL|RESTRICT|NO\s+ACTION|SET\s+DEFAULT))?"""
     )
