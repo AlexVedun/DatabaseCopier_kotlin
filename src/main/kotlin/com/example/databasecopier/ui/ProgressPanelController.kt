@@ -59,12 +59,12 @@ class ProgressPanelController(
     ).apply { padding = Insets(8.0); maxWidth = Double.MAX_VALUE }
 
     private var collectorJob: Job? = null
+    private var isContinuationView = false
 
     // По умолчанию кнопка "Запустить" создаёт новую сессию из настроенных source/target панелей.
-    // Но в режиме продолжения сессии (CopyView(existingSessionId)) эти панели не отображаются и не
-    // настроены — там повторное нажатие "Запустить" (например, после failed) обязано повторить
-    // именно resumeSession(id), а не start(), иначе пользователь неизбежно получает "источник не
-    // настроен", даже когда сессия и её источник/приёмник давно сохранены в служебной БД.
+    // После сбоя или паузы та же кнопка продолжает сохранённую сессию: start() создал бы новую
+    // сессию и пересоздал уже заполненные таблицы приёмника. В режиме CopyView(existingSessionId)
+    // панели источника/приёмника не настроены, поэтому там всегда нужен resumeSession(id).
     private var onStartRequested: () -> Unit = { start() }
 
     init {
@@ -121,7 +121,9 @@ class ProgressPanelController(
      * никакого нового ввода от пользователя не требуется.
      */
     fun resumeSession(id: Int) {
+        if (sessionId == null) isContinuationView = true
         onStartRequested = { resumeSession(id) }
+        startButton.text = Messages.get("progress.continue")
 
         val session = CopySessionRepository.getSession(id)
         if (session == null) {
@@ -219,6 +221,12 @@ class ProgressPanelController(
         cancelButton.isDisable = true
         overallLabel.text = Messages.get("progress.sessionCancelled")
         errorLabel.text = ""
+        if (isContinuationView) {
+            startButton.isDisable = true
+        } else {
+            onStartRequested = { start() }
+            startButton.text = Messages.get("progress.start")
+        }
     }
 
     private fun onProgress(event: CopyProgressEvent, totalTables: Int) {
@@ -254,11 +262,21 @@ class ProgressPanelController(
     }
 
     private fun onFinished(sessionId: Int) {
-        startButton.isDisable = false
-        pauseButton.isDisable = true
         val session = CopySessionRepository.getSession(sessionId)
-        // "Отменить" остаётся доступна после failed/paused — иначе с упавшей сессией нельзя было
-        // сделать вообще ничего, кроме бесконечных попыток "Запустить" заново.
+        when (session?.status) {
+            "failed", "paused" -> {
+                onStartRequested = { resumeSession(sessionId) }
+                startButton.text = Messages.get("progress.continue")
+            }
+            "completed", "cancelled" -> if (!isContinuationView) {
+                onStartRequested = { start() }
+                startButton.text = Messages.get("progress.start")
+            }
+        }
+        startButton.isDisable = isContinuationView && session?.status == "cancelled"
+        pauseButton.isDisable = true
+        // "Отменить" остаётся доступна после failed/paused, чтобы можно было отказаться от
+        // продолжения и (на обычном экране) снова начать копирование с нуля.
         cancelButton.isDisable = session?.status !in setOf("failed", "paused")
         overallLabel.text = Messages.get("progress.sessionFinished", session?.status?.let { Messages.status(it) } ?: "")
         if (session?.status == "completed") {

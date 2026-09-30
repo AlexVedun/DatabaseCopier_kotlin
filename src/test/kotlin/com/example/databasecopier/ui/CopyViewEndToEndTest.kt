@@ -8,6 +8,8 @@ import com.example.databasecopier.Connections
 import com.example.databasecopier.adapter.ConnectionConfig
 import com.example.databasecopier.adapter.DbType
 import com.example.databasecopier.connection.ConnectionRepository
+import com.example.databasecopier.i18n.Messages
+import com.example.databasecopier.session.CopySessionRepository
 import javafx.application.Platform
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
@@ -157,6 +159,30 @@ class CopyViewEndToEndTest {
                 }
             }
         }
+
+        // Имитируем ошибку уже созданной сессии: в обычном CopyView повторный клик должен
+        // продолжить её, а не создать новую сессию и пересоздать таблицу приёмника.
+        runOnFx {
+            CopySessionRepository.updateSessionStatus(sessionId, "failed", lastError = "test failure")
+            view.progressPanel.javaClass.getDeclaredMethod("onFinished", Int::class.javaPrimitiveType)
+                .apply { isAccessible = true }
+                .invoke(view.progressPanel, sessionId)
+            assertEquals(Messages.get("progress.continue"), getStartButton(view.progressPanel).text)
+            clickStartButton(view.progressPanel)
+            assertEquals(sessionId, view.progressPanel.sessionId)
+        }
+        waitUntil(timeoutMs = 20_000) {
+            CopySessionRepository.getSession(sessionId)?.status in setOf("completed", "failed")
+        }
+        assertEquals("completed", CopySessionRepository.getSession(sessionId)?.status)
+        DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { conn ->
+            conn.createStatement().use { stmt ->
+                stmt.executeQuery("SELECT COUNT(*) FROM people").use { rs ->
+                    rs.next()
+                    assertEquals(totalRows, rs.getInt(1))
+                }
+            }
+        }
     }
 
     // --- вспомогательные функции для управления приватным полем "picker" контроллеров через
@@ -181,10 +207,13 @@ class CopyViewEndToEndTest {
     }
 
     private fun clickStartButton(progressPanel: ProgressPanelController) {
+        getStartButton(progressPanel).fire()
+    }
+
+    private fun getStartButton(progressPanel: ProgressPanelController): javafx.scene.control.Button {
         val field = progressPanel.javaClass.getDeclaredField("startButton")
         field.isAccessible = true
-        val button = field.get(progressPanel) as javafx.scene.control.Button
-        button.fire()
+        return field.get(progressPanel) as javafx.scene.control.Button
     }
 
     private fun runOnFx(block: () -> Unit) {
