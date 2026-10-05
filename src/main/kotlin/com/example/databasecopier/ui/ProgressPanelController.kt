@@ -240,6 +240,11 @@ class ProgressPanelController(
         // этих двух phase, см. CopyProgressEvent). Без отдельной ветки здесь пользователь во время
         // этих проходов видел бы застывшую на последней скопированной таблице полоску без единого
         // намёка на то, сколько ещё осталось — так и был обнаружен этот пробел.
+        if (event.phase == "counting_rows") {
+            tableLabel.text = Messages.get("progress.countingRows", event.tableName)
+            tableProgressBar.progress = 0.0
+            return
+        }
         val phaseLabel = when (event.phase) {
             "foreign_keys", "views", "routines" -> Messages.get("progress.phase.${event.phase}")
             else -> null

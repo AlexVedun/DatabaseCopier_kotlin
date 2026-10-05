@@ -26,6 +26,7 @@ import javafx.stage.FileChooser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.slf4j.LoggerFactory
 import java.io.File
 
 /**
@@ -33,6 +34,10 @@ import java.io.File
  * выбор через переключатель, оба режима заканчиваются одним и тем же списком таблиц с чекбоксами.
  */
 class SourcePanelController {
+
+    companion object {
+        private val log = LoggerFactory.getLogger(SourcePanelController::class.java)
+    }
 
     private val picker = ConnectionPicker()
 
@@ -145,9 +150,9 @@ class SourcePanelController {
     }
 
     private var selection: SourceSelection? = null
-    // Кол-во строк на таблицу, как его отдал SourceAdapter.listTables() (точный COUNT(*) для живых
-    // БД, дешёвая оценка для дампов — см. DumpIndexer) — сохраняется, чтобы передать в сессию как
-    // rowsTotal при старте копирования, не пересчитывая ещё раз.
+    // Кол-во строк на таблицу, как его отдал SourceAdapter.listTables() (быстрая оценка системного
+    // каталога для живых БД, дешёвая оценка для дампов — см. DumpIndexer) — сохраняется, чтобы
+    // передать в сессию как rowsTotal при старте копирования, не выполнять дорогой COUNT(*).
     private var lastRowCounts: Map<String, Long?> = emptyMap()
     // Полный список процедур/функций источника (независимо от того, совпадает ли сейчас тип
     // приёмника) — запрашивается один раз при подключении; видимость в routinesTable пересчитывает
@@ -254,8 +259,18 @@ class SourcePanelController {
             val adapter = JdbcSourceAdapter(config)
             try {
                 adapter.connect()
+                withContext(Dispatchers.Main) { picker.statusLabel.text = Messages.get("source.loadingTables") }
+                log.info("Подключение '{}' — загрузка списка таблиц", record.name)
                 val tables = adapter.listTables()
+                withContext(Dispatchers.Main) {
+                    picker.statusLabel.text = Messages.get("source.loadingViews", tables.size)
+                }
+                log.info("Подключение '{}' — таблиц получено: {}; загрузка представлений", record.name, tables.size)
                 val views = adapter.listViews()
+                withContext(Dispatchers.Main) {
+                    picker.statusLabel.text = Messages.get("source.loadingRoutines", views.size)
+                }
+                log.info("Подключение '{}' — представлений получено: {}; загрузка процедур/функций", record.name, views.size)
                 val routines = adapter.listRoutines()
                 withContext(Dispatchers.Main) {
                     selection = SourceSelection.Connection(config, record.id)
@@ -267,7 +282,15 @@ class SourcePanelController {
                     picker.statusLabel.text = Messages.get("source.connected", tables.size)
                     connectedProperty.set(true)
                 }
+                log.info(
+                    "Подключение '{}' — метаданные источника загружены: таблиц={}, представлений={}, процедур/функций={}",
+                    record.name,
+                    tables.size,
+                    views.size,
+                    routines.size,
+                )
             } catch (e: Exception) {
+                log.error("Подключение '{}' — не удалось загрузить метаданные источника: {}", record.name, e.message, e)
                 withContext(Dispatchers.Main) {
                     selection = null
                     connectedProperty.set(false)

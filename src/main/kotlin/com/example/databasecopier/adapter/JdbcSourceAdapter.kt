@@ -70,20 +70,58 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
     }
 
     override fun listTables(): Map<String, Long?> = withConnectionRetry {
-        val sql = if (config.type == DbType.SQLITE) {
-            "SELECT name AS table_name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'"
-        } else {
-            "SELECT table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND ${schemaClause()}"
+        val startedAt = System.currentTimeMillis()
+        log.info("Источник {} ({}) — получаю список таблиц и оценки количества строк", config.type, config.database)
+        // Точный SELECT COUNT(*) по каждой таблице недопустим при первоначальной проверке
+        // подключения: на базе в сотни гигабайт он читает практически все данные. Кроме того,
+        // MySQL может закрыть ResultSet со списком таблиц при выполнении вложенного COUNT(*) на
+        // том же соединении ("Operation not allowed after ResultSet closed"). Системные каталоги
+        // возвращают все имена и дешёвые оценки строк одним запросом. Оценка nullable: у новой/
+        // ещё не проанализированной таблицы СУБД может пока не иметь статистики.
+        val sql = when (config.type) {
+            DbType.MYSQL ->
+                "SELECT table_name, table_rows AS row_count FROM information_schema.tables " +
+                    "WHERE table_type = 'BASE TABLE' AND ${schemaClause()} ORDER BY table_name"
+            DbType.POSTGRESQL ->
+                "SELECT c.relname AS table_name, " +
+                    "CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint ELSE NULL END AS row_count " +
+                    "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace " +
+                    "WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') ORDER BY c.relname"
+            DbType.SQLSERVER ->
+                "SELECT t.name AS table_name, SUM(p.rows) AS row_count " +
+                    "FROM sys.tables t JOIN sys.schemas s ON s.schema_id = t.schema_id " +
+                    "JOIN sys.partitions p ON p.object_id = t.object_id AND p.index_id IN (0, 1) " +
+                    "WHERE s.name = 'dbo' GROUP BY t.name ORDER BY t.name"
+            // SQLite не хранит статистику числа строк; точный подсчёт выполняется ниже уже после
+            // закрытия ResultSet со списком таблиц.
+            DbType.SQLITE ->
+                "SELECT name AS table_name, NULL AS row_count FROM sqlite_master " +
+                    "WHERE type = 'table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name"
         }
         val result = LinkedHashMap<String, Long?>()
         connection.createStatement().use { stmt ->
             stmt.executeQuery(sql).use { rs ->
                 while (rs.next()) {
                     val name = rs.getString("table_name")
-                    result[name] = countRows(name)
+                    val estimate = rs.getLong("row_count")
+                    result[name] = if (rs.wasNull()) null else estimate
                 }
             }
         }
+        if (config.type == DbType.SQLITE) {
+            // Для SQLite пользователь предпочёл прежнее точное поведение: локальные файлы обычно
+            // невелики, а системной оценки количества строк SQLite не предоставляет. Имена уже
+            // собраны и ResultSet закрыт, поэтому COUNT(*) не конфликтует с его обходом.
+            for (table in result.keys.toList()) result[table] = countRows(table)
+        }
+        log.info(
+            "Источник {} ({}) — список таблиц получен: {}, оценки строк доступны для {}, {} мс",
+            config.type,
+            config.database,
+            result.size,
+            result.values.count { it != null },
+            System.currentTimeMillis() - startedAt,
+        )
         return result
     }
 
@@ -830,14 +868,35 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
     }
 
     override fun countRows(table: String): Long? {
+        val startedAt = System.currentTimeMillis()
+        log.info("Источник {} ({}) — таблица {}: точный подсчёт строк", config.type, config.database, table)
         return try {
-            connection.createStatement().use { stmt ->
-                stmt.executeQuery("SELECT COUNT(*) FROM ${quote(table)}").use { rs ->
-                    rs.next()
-                    rs.getLong(1)
+            val count = withConnectionRetry {
+                connection.createStatement().use { stmt ->
+                    stmt.executeQuery("SELECT COUNT(*) FROM ${quote(table)}").use { rs ->
+                        rs.next()
+                        rs.getLong(1)
+                    }
                 }
             }
+            log.info(
+                "Источник {} ({}) — таблица {}: строк={}, подсчёт занял {} мс",
+                config.type,
+                config.database,
+                table,
+                count,
+                System.currentTimeMillis() - startedAt,
+            )
+            count
         } catch (e: Exception) {
+            log.warn(
+                "Источник {} ({}) — таблица {}: не удалось определить точное число строк за {} мс: {}",
+                config.type,
+                config.database,
+                table,
+                System.currentTimeMillis() - startedAt,
+                e.message,
+            )
             null
         }
     }

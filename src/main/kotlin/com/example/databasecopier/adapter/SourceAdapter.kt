@@ -7,6 +7,7 @@ interface SourceAdapter {
     fun listTables(): Map<String, Long?>
     fun getTableStructure(table: String): TableStructure
     fun getForeignKeys(table: String): List<ForeignKeyRef>
+    /** Точное количество строк; вызывается только перед копированием выбранной таблицы. */
     fun countRows(table: String): Long?
     /** Имена представлений (views) источника. Для дамп-источников всегда пусто — парсер дампов
      *  не индексирует CREATE VIEW (см. Шаг 13 инструкции). */

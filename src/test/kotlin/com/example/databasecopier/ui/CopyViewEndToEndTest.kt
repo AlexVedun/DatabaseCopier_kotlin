@@ -145,11 +145,11 @@ class CopyViewEndToEndTest {
         val session = com.example.databasecopier.session.CopySessionRepository.getSession(sessionId)!!
         assertEquals("completed", session.status, "lastError=${session.lastError}")
 
-        // Для живых БД-подключений точный COUNT(*) уже известен из listTables() в момент
-        // "Проверить подключение" — он должен быть сохранён в сессии как rowsTotal, чтобы работал
-        // второй (по конкретной таблице) ProgressBar, а не только "N из M таблиц".
+        // При проверке подключения используется быстрая каталожная оценка, но непосредственно
+        // перед копированием CopyRunner определяет точный COUNT(*) выбранной таблицы и сохраняет
+        // его в сессии для корректного прогресс-бара.
         val tableRecord = com.example.databasecopier.session.CopySessionRepository.getTables(sessionId).first()
-        assertEquals(totalRows.toLong(), tableRecord.rowsTotal, "rowsTotal должен быть известен заранее для живого подключения")
+        assertEquals(totalRows.toLong(), tableRecord.rowsTotal)
 
         DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { conn ->
             conn.createStatement().use { stmt ->

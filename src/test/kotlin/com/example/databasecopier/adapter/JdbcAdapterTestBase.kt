@@ -64,10 +64,20 @@ abstract class JdbcAdapterTestBase {
     }
 
     @Test
-    fun `lists tables with row counts`() {
+    fun `lists tables with catalog row estimates without requiring exact counts`() {
         val tables = source.listTables()
-        assertEquals(25L, tables["orders"])
-        assertEquals(5L, tables["customers"])
+        assertTrue("orders" in tables)
+        assertTrue("customers" in tables)
+        assertTrue(tables.values.all { it == null || it >= 0L })
+        if (config().type == DbType.SQLITE) {
+            assertEquals(25L, tables["orders"])
+            assertEquals(5L, tables["customers"])
+        }
+
+        // Точный подсчёт остаётся доступен явно, но listTables() больше не запускает его для
+        // каждой таблицы: это сделало бы проверку подключения пропорциональной размеру всей БД.
+        assertEquals(25L, source.countRows("orders"))
+        assertEquals(5L, source.countRows("customers"))
     }
 
     @Test

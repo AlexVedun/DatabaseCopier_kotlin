@@ -192,6 +192,7 @@ class CopyRunnerTest {
         assertEquals("completed", finalSession.status)
         assertEquals("done", finalTable.status)
         assertEquals(totalRows.toLong(), finalTable.rowsCopied)
+        assertEquals(totalRows.toLong(), finalTable.rowsTotal)
 
         DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { conn ->
             conn.createStatement().use { stmt ->

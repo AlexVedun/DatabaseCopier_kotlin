@@ -85,6 +85,7 @@ class SqliteCopyRunnerTest {
         assertEquals("completed", session.status, "lastError=${session.lastError}")
         assertEquals("done", table.status)
         assertEquals(totalRows.toLong(), table.rowsCopied)
+        assertEquals(totalRows.toLong(), table.rowsTotal)
 
         DriverManager.getConnection("jdbc:sqlite:${targetConfig.database}").use { conn ->
             conn.createStatement().use { stmt ->

@@ -82,6 +82,16 @@ class CopyRunner {
                 // полностью скопирована) читал бы с начала и падал на дубликате PK при вставке
                 // уже скопированных строк.
                 if (needsData && !current.dataCopied) {
+                    // Каталожная оценка, полученная при проверке подключения, позволяет быстро
+                    // показать список даже для БД на сотни гигабайт, но для корректного прогресс-
+                    // бара перед копированием выбранной таблицы нужен точный COUNT(*). Он делается
+                    // только здесь — последовательно и только для реально выбранных таблиц.
+                    emitCountingRows(sessionId, current)
+                    val exactRowsTotal = source.countRows(current.tableName)
+                    if (exactRowsTotal != null) {
+                        CopySessionRepository.updateTableRowsTotal(current.id, exactRowsTotal)
+                        current = current.copy(rowsTotal = exactRowsTotal)
+                    }
                     val autoIncrementColumn = structure.columns.firstOrNull { it.autoIncrement }?.name
                     current = copyTableData(sessionId, current, source, target, session.batchSize, autoIncrementColumn)
                         ?: return@withContext // паузa/отмена внутри копирования данных таблицы
@@ -252,6 +262,20 @@ class CopyRunner {
                 tableStatus = table.status,
                 rowsCopied = table.rowsCopied,
                 rowsTotal = table.rowsTotal,
+            )
+        )
+    }
+
+    private fun emitCountingRows(sessionId: Int, table: CopySessionTableRecord) {
+        _progress.tryEmit(
+            CopyProgressEvent(
+                sessionId = sessionId,
+                tableId = table.id,
+                tableName = table.tableName,
+                tableStatus = table.status,
+                rowsCopied = table.rowsCopied,
+                rowsTotal = null,
+                phase = "counting_rows",
             )
         )
     }

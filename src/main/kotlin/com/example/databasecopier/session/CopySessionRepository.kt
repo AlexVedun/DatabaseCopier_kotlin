@@ -153,6 +153,12 @@ object CopySessionRepository {
         }
     }
 
+    fun updateTableRowsTotal(id: Int, rowsTotal: Long) = transaction {
+        CopySessionTables.update({ CopySessionTables.id eq id }) {
+            it[CopySessionTables.rowsTotal] = rowsTotal
+        }
+    }
+
     /**
      * Вызывается при старте приложения: сессии, оставшиеся в статусе "running" после
      * некорректного завершения предыдущего запуска (закрытие окна во время копирования),
