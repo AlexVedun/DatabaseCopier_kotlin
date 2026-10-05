@@ -20,6 +20,9 @@ import javafx.util.StringConverter
  */
 class ConnectionPicker {
 
+    private val selectionListeners = mutableListOf<(DbType?) -> Unit>()
+    private var refreshing = false
+
     companion object {
         // Совпадает с шириной подписей в ConnectionEditDialog — визуально выравнивает эту строку
         // с остальными формами приложения.
@@ -49,7 +52,10 @@ class ConnectionPicker {
     ).apply { padding = Insets(4.0) }
 
     init {
-        combo.valueProperty().addListener { _, _, newValue -> testButton.isDisable = newValue == null }
+        combo.valueProperty().addListener { _, _, newValue ->
+            testButton.isDisable = newValue == null
+            if (!refreshing) selectionListeners.forEach { it(newValue?.config?.type) }
+        }
         refresh()
     }
 
@@ -57,11 +63,31 @@ class ConnectionPicker {
      *  окна "Подключения" (там список мог измениться). Пытается сохранить текущий выбор по id. */
     fun refresh() {
         val selectedId = combo.value?.id
-        combo.items.setAll(ConnectionRepository.list())
-        combo.value = combo.items.find { it.id == selectedId } ?: combo.items.firstOrNull()
+        val selectedType = combo.value?.config?.type
+        val connections = ConnectionRepository.list()
+        // При setAll() JavaFX сохраняет индекс выделения внутреннего ListView выпадающего
+        // списка. Если после редактирования изменился порядок подключений, поле ComboBox уже
+        // показывает нужную запись, но раскрытый список подсвечивает запись на старом индексе.
+        // Сбрасываем и value, и selectionModel до замены элементов, затем выбираем по id заново.
+        // Не рассылаем промежуточный null наружу: это сбросило бы выбранные процедуры в панели
+        // источника при простом открытии/закрытии диалога подключений без изменения выбора.
+        refreshing = true
+        try {
+            combo.selectionModel.clearSelection()
+            combo.value = null
+            combo.items.setAll(connections)
+            val selectedIndex = combo.items.indexOfFirst { it.id == selectedId }.takeIf { it >= 0 }
+                ?: if (combo.items.isEmpty()) -1 else 0
+            if (selectedIndex >= 0) combo.selectionModel.select(selectedIndex)
+        } finally {
+            refreshing = false
+        }
+        if (selectedId != combo.value?.id || selectedType != combo.value?.config?.type) {
+            selectionListeners.forEach { it(combo.value?.config?.type) }
+        }
     }
 
     fun onSelectionChanged(listener: (DbType?) -> Unit) {
-        combo.valueProperty().addListener { _, _, newValue -> listener(newValue?.config?.type) }
+        selectionListeners += listener
     }
 }
