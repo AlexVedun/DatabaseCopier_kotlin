@@ -83,17 +83,25 @@ class CopyRunner {
                 // уже скопированных строк.
                 if (needsData && !current.dataCopied) {
                     // Каталожная оценка, полученная при проверке подключения, позволяет быстро
-                    // показать список даже для БД на сотни гигабайт, но для корректного прогресс-
-                    // бара перед копированием выбранной таблицы нужен точный COUNT(*). Он делается
-                    // только здесь — последовательно и только для реально выбранных таблиц.
+                    // показать список даже для БД на сотни гигабайт. Перед копированием адаптер
+                    // уточняет её через COUNT(*) только когда это не должно надолго задержать
+                    // запуск; для крупных таблиц прогресс остаётся приблизительным до EOF.
                     emitCountingRows(sessionId, current)
-                    val exactRowsTotal = source.countRows(current.tableName)
-                    if (exactRowsTotal != null) {
-                        CopySessionRepository.updateTableRowsTotal(current.id, exactRowsTotal)
-                        current = current.copy(rowsTotal = exactRowsTotal)
+                    val rowCount = source.countRowsForCopy(current.tableName, current.rowsTotal)
+                    if (rowCount.value != null) {
+                        CopySessionRepository.updateTableRowsTotal(current.id, rowCount.value)
+                        current = current.copy(rowsTotal = rowCount.value)
                     }
                     val autoIncrementColumn = structure.columns.firstOrNull { it.autoIncrement }?.name
-                    current = copyTableData(sessionId, current, source, target, session.batchSize, autoIncrementColumn)
+                    current = copyTableData(
+                        sessionId,
+                        current,
+                        source,
+                        target,
+                        session.batchSize,
+                        autoIncrementColumn,
+                        rowCount.exact,
+                    )
                         ?: return@withContext // паузa/отмена внутри копирования данных таблицы
                 }
 
@@ -195,12 +203,13 @@ class CopyRunner {
         target: TargetAdapter,
         batchSize: Int,
         autoIncrementColumn: String?,
+        rowsTotalExact: Boolean,
     ): CopySessionTableRecord? {
         var current = initial
         log.info("Сессия {}: таблица {} — начинаю копирование данных (batchSize={}, уже скопировано строк={})", sessionId, current.tableName, batchSize, current.rowsCopied)
         CopySessionRepository.updateTableStatus(current.id, "in_progress")
         current = current.copy(status = "in_progress")
-        emit(sessionId, current)
+        emit(sessionId, current, rowsTotalExact)
 
         var cursor: JsonElement? = current.cursorJson?.let { Json.parseToJsonElement(it) }
         var maxAutoIncrementValue: Long? = null
@@ -228,7 +237,7 @@ class CopyRunner {
             val cursorJson = batch.nextCursor?.toString()
             CopySessionRepository.updateTableProgress(current.id, rowsCopied, cursorJson)
             current = current.copy(rowsCopied = rowsCopied, cursorJson = cursorJson)
-            emit(sessionId, current)
+            emit(sessionId, current, rowsTotalExact)
 
             cursor = batch.nextCursor
             if (cursor == null) break
@@ -243,7 +252,11 @@ class CopyRunner {
         }
 
         CopySessionRepository.markDataCopied(current.id)
-        current = current.copy(dataCopied = true)
+        // После EOF число фактически прочитанных строк уже является точным и получается бесплатно,
+        // даже если перед копированием использовалась приблизительная каталожная статистика.
+        CopySessionRepository.updateTableRowsTotal(current.id, current.rowsCopied)
+        current = current.copy(dataCopied = true, rowsTotal = current.rowsCopied)
+        emit(sessionId, current, rowsTotalExact = true)
 
         return current
     }
@@ -253,7 +266,7 @@ class CopyRunner {
         return status == "running"
     }
 
-    private fun emit(sessionId: Int, table: CopySessionTableRecord) {
+    private fun emit(sessionId: Int, table: CopySessionTableRecord, rowsTotalExact: Boolean = true) {
         _progress.tryEmit(
             CopyProgressEvent(
                 sessionId = sessionId,
@@ -262,6 +275,7 @@ class CopyRunner {
                 tableStatus = table.status,
                 rowsCopied = table.rowsCopied,
                 rowsTotal = table.rowsTotal,
+                rowsTotalExact = rowsTotalExact,
             )
         )
     }

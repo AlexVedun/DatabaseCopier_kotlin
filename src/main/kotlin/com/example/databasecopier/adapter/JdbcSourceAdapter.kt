@@ -14,6 +14,12 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
 
     companion object {
         private val log = LoggerFactory.getLogger(JdbcSourceAdapter::class.java)
+        // Выше этого порога точный COUNT(*) на удалённом сервере обычно обходится дороже пользы:
+        // реальный кейс с ~200 млн строк дважды доходил до 20-минутного socketTimeout.
+        private const val MAX_ROWS_FOR_EXACT_COPY_COUNT = 5_000_000L
+        // Оценка может отсутствовать или быть устаревшей, поэтому небольшой ограниченный шанс
+        // точному подсчёту всё же даём. Это не должно задерживать копирование на десятки минут.
+        private const val COPY_COUNT_TIMEOUT_SECONDS = 60
         // SQLite не хранит длину отдельно от объявленного типа (PRAGMA table_info возвращает
         // её как часть строки, например "VARCHAR(100)") — извлекаем тем же способом, что и для
         // дампов, см. CreateTableParser.
@@ -899,6 +905,61 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
             )
             null
         }
+    }
+
+    override fun countRowsForCopy(table: String, estimatedRows: Long?): RowCountResult {
+        if (config.type != DbType.SQLITE && estimatedRows != null && estimatedRows >= MAX_ROWS_FOR_EXACT_COPY_COUNT) {
+            log.info(
+                "Источник {} ({}) — таблица {}: пропускаю точный COUNT(*) для крупной таблицы, " +
+                    "использую каталожную оценку {} строк",
+                config.type,
+                config.database,
+                table,
+                estimatedRows,
+            )
+            return RowCountResult(estimatedRows, exact = false)
+        }
+
+        val startedAt = System.currentTimeMillis()
+        log.info(
+            "Источник {} ({}) — таблица {}: точный подсчёт строк для прогресса (таймаут {} с)",
+            config.type,
+            config.database,
+            table,
+            COPY_COUNT_TIMEOUT_SECONDS,
+        )
+        val exact = try {
+            connection.createStatement().use { stmt ->
+                stmt.queryTimeout = COPY_COUNT_TIMEOUT_SECONDS
+                stmt.executeQuery("SELECT COUNT(*) FROM ${quote(table)}").use { rs ->
+                    rs.next()
+                    rs.getLong(1)
+                }
+            }
+        } catch (e: Exception) {
+            log.warn(
+                "Источник {} ({}) — таблица {}: точный подсчёт для прогресса прекращён через {} мс, " +
+                    "использую каталожную оценку {}: {}",
+                config.type,
+                config.database,
+                table,
+                System.currentTimeMillis() - startedAt,
+                estimatedRows,
+                e.message,
+            )
+            null
+        }
+        if (exact != null) {
+            log.info(
+                "Источник {} ({}) — таблица {}: точное количество строк для прогресса={}, {} мс",
+                config.type,
+                config.database,
+                table,
+                exact,
+                System.currentTimeMillis() - startedAt,
+            )
+        }
+        return RowCountResult(exact ?: estimatedRows, exact != null)
     }
 
     override fun readBatch(table: String, cursor: JsonElement?, batchSize: Int): BatchResult = withConnectionRetry {

@@ -144,7 +144,9 @@ class CopyRunnerTest {
             copyMode = "structure_and_data",
             batchSize = batchSize,
         )
-        val tableId = CopySessionRepository.addTable(sessionId, "items")
+        // Заведомо завышенная каталожная оценка имитирует огромную таблицу: CopyRunner не должен
+        // запускать дорогой COUNT(*), но после EOF обязан заменить оценку точным числом строк.
+        val tableId = CopySessionRepository.addTable(sessionId, "items", rowsTotal = 200_000_000L)
 
         // Фаза 1: скопировать структуру и один батч данных "вручную" — эмуляция того, что
         // приложение было прервано (например, закрыто) после первого батча.

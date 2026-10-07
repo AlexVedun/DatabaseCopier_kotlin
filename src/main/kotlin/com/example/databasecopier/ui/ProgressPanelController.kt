@@ -253,16 +253,25 @@ class ProgressPanelController(
             tableLabel.text = Messages.get("progress.phaseProgress", phaseLabel, event.rowsCopied, event.rowsTotal ?: 0L, event.tableName)
         } else {
             tableLabel.text = event.rowsTotal?.let {
-                Messages.get("progress.rows.withTotal", event.tableName, event.rowsCopied, it)
+                if (event.rowsTotalExact) {
+                    Messages.get("progress.rows.withTotal", event.tableName, event.rowsCopied, it)
+                } else if (event.rowsCopied > it) {
+                    Messages.get("progress.rows.withExceededEstimate", event.tableName, event.rowsCopied, it)
+                } else {
+                    Messages.get("progress.rows.withEstimatedTotal", event.tableName, event.rowsCopied, it)
+                }
             } ?: Messages.get("progress.rows.withoutTotal", event.tableName, event.rowsCopied)
         }
         // progress = -1.0 (JavaFX "indeterminate") рисуется как непрерывно бегающая туда-сюда
         // анимированная полоска — из-за постоянной перерисовки это грузит CPU почти на 100% на
-        // время всего копирования такой таблицы. Раз общее число строк неизвестно (rowsTotal ==
-        // null, source.countRows() не смог его получить) или равно 0 (копировать нечего), честного
-        // соотношения всё равно не показать — вместо анимации просто держим полоску пустой/полной.
+        // время всего копирования такой таблицы. Раз общее число строк неизвестно или является
+        // только приблизительной каталожной оценкой, честные 100% можно показать лишь после EOF —
+        // вместо анимации держим полоску пустой либо ограничиваем оценочный прогресс значением 99%.
         tableProgressBar.progress = event.rowsTotal?.let { total ->
-            if (total > 0) event.rowsCopied.toDouble() / total else 1.0
+            if (total > 0) {
+                val ratio = event.rowsCopied.toDouble() / total
+                if (event.rowsTotalExact) ratio else ratio.coerceAtMost(0.99)
+            } else if (event.rowsTotalExact) 1.0 else 0.0
         } ?: 0.0
     }
 

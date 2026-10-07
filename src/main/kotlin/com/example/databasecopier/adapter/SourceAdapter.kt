@@ -9,6 +9,14 @@ interface SourceAdapter {
     fun getForeignKeys(table: String): List<ForeignKeyRef>
     /** Точное количество строк; вызывается только перед копированием выбранной таблицы. */
     fun countRows(table: String): Long?
+    /**
+     * Количество строк для прогресса копирования. Реализация может отказаться от дорогого
+     * COUNT(*) и вернуть каталожную оценку с exact=false.
+     */
+    fun countRowsForCopy(table: String, estimatedRows: Long?): RowCountResult {
+        val exact = countRows(table)
+        return RowCountResult(exact ?: estimatedRows, exact != null)
+    }
     /** Имена представлений (views) источника. Для дамп-источников всегда пусто — парсер дампов
      *  не индексирует CREATE VIEW (см. Шаг 13 инструкции). */
     fun listViews(): List<String>
@@ -25,3 +33,5 @@ interface SourceAdapter {
     fun readBatch(table: String, cursor: JsonElement?, batchSize: Int): BatchResult
     fun close()
 }
+
+data class RowCountResult(val value: Long?, val exact: Boolean)

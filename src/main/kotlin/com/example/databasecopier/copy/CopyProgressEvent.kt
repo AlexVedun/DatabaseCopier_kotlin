@@ -12,5 +12,6 @@ data class CopyProgressEvent(
     val tableStatus: String,
     val rowsCopied: Long,
     val rowsTotal: Long?,
+    val rowsTotalExact: Boolean = true,
     val phase: String = "data",
 )

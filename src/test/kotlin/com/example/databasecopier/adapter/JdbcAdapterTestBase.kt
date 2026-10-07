@@ -81,6 +81,19 @@ abstract class JdbcAdapterTestBase {
     }
 
     @Test
+    fun `skips exact copy count for large catalog estimates except SQLite`() {
+        val estimate = 200_000_000L
+        val result = source.countRowsForCopy("orders", estimate)
+        if (config().type == DbType.SQLITE) {
+            assertTrue(result.exact)
+            assertEquals(25L, result.value)
+        } else {
+            assertFalse(result.exact)
+            assertEquals(estimate, result.value)
+        }
+    }
+
+    @Test
     fun `reads table structure with primary key`() {
         val structure = source.getTableStructure("orders")
         assertEquals(listOf("id"), structure.primaryKey)
