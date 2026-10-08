@@ -1,8 +1,12 @@
 name: Build native release packages
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      # Точная проверка формата выполняется в job version. Эти glob-шаблоны ограничивают
+      # автоматический запуск тегами, которые начинаются с цифры или с "v" и цифры.
+      - "[0-9]*"
+      - "v[0-9]*"
   workflow_dispatch:
     inputs:
       version:
@@ -23,10 +27,13 @@ jobs:
       - name: Validate version
         id: version
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
           MANUAL_VERSION: ${{ inputs.version }}
         run: |
-          raw_version="${RELEASE_TAG:-$MANUAL_VERSION}"
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            raw_version="$GITHUB_REF_NAME"
+          else
+            raw_version="$MANUAL_VERSION"
+          fi
           version="${raw_version#v}"
           if [[ ! "$version" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
             echo "Package version must contain one to three numeric components: $raw_version" >&2
@@ -134,9 +141,9 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Attach packages to GitHub Release
-    if: github.event_name == 'release'
-    needs: [linux, windows, macos]
+    name: Create GitHub Release
+    if: github.event_name == 'push'
+    needs: [version, linux, windows, macos]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -146,9 +153,13 @@ jobs:
           pattern: database-copier-*
           path: release-assets
           merge-multiple: true
-      - name: Upload release assets
+      - name: Create release and upload packages
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$RELEASE_TAG" release-assets/* --clobber
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ needs.version.outputs.value }}
+        run: >-
+          gh release create "$RELEASE_TAG" release-assets/*
+          --title "$RELEASE_VERSION"
+          --generate-notes
