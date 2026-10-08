@@ -294,57 +294,59 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
     }
 
     override fun createIndexesAndConstraints(structure: TableStructure) {
-        val columnsByName = structure.columns.associateBy { it.name }
-        connection.createStatement().use { stmt ->
-            for (idx in structure.indexes) {
-                // FULLTEXT/SPATIAL не поддерживаются вне MySQL/MariaDB в том же синтаксисе (Postgres
-                // требует отдельных GIN/GiST-индексов с другим набором операторов, что не является
-                // эквивалентным автоматическим переносом) — такой индекс просто пропускается на
-                // non-MySQL target, вместо того чтобы падать или тихо создавать бесполезный BTREE.
-                if (idx.kind != IndexKind.NORMAL && config.type != DbType.MYSQL) continue
-                val keywordSql = when (idx.kind) {
-                    IndexKind.FULLTEXT -> "FULLTEXT "
-                    IndexKind.SPATIAL -> "SPATIAL "
-                    IndexKind.NORMAL -> if (idx.unique) "UNIQUE " else ""
+        withLongRunningDdl("создание индексов/CHECK для ${structure.name}") {
+            val columnsByName = structure.columns.associateBy { it.name }
+            connection.createStatement().use { stmt ->
+                for (idx in structure.indexes) {
+                    // FULLTEXT/SPATIAL не поддерживаются вне MySQL/MariaDB в том же синтаксисе (Postgres
+                    // требует отдельных GIN/GiST-индексов с другим набором операторов, что не является
+                    // эквивалентным автоматическим переносом) — такой индекс просто пропускается на
+                    // non-MySQL target, вместо того чтобы падать или тихо создавать бесполезный BTREE.
+                    if (idx.kind != IndexKind.NORMAL && config.type != DbType.MYSQL) continue
+                    val keywordSql = when (idx.kind) {
+                        IndexKind.FULLTEXT -> "FULLTEXT "
+                        IndexKind.SPATIAL -> "SPATIAL "
+                        IndexKind.NORMAL -> if (idx.unique) "UNIQUE " else ""
+                    }
+                    val cols = idx.columns.joinToString(", ") { quote(it) }
+                    // Имя переносится как есть (только санация длины, см. safeIdentifier) — по
+                    // требованию: если два разных объекта источника конфликтуют по имени на target
+                    // (в Postgres/MSSQL имена индексов схемо-уникальны), это реальная проблема данных
+                    // источника и должна быть видна пользователю, а не молча замаскирована префиксом.
+                    val name = safeIdentifier(idx.name)
+                    // MySQL/Postgres/SQLite разрешают сколько угодно NULL в UNIQUE-колонке (NULL не
+                    // равен NULL для проверки уникальности) — MSSQL, наоборот, считает несколько NULL
+                    // дубликатом и обычный CREATE UNIQUE INDEX падает с "duplicate key ... value is
+                    // (<NULL>)" на любой таблице, где такая колонка не заполнена хотя бы дважды. Чтобы
+                    // воспроизвести исходную семантику, а не терять данные и не падать, для MSSQL
+                    // уникальный индекс по nullable-колонкам создаётся как filtered index (WHERE col
+                    // IS NOT NULL) — уникальность проверяется только среди заполненных строк, как и на
+                    // остальных диалектах.
+                    val nullableCols = idx.columns.filter { columnsByName[it]?.nullable == true }
+                    val whereSql = if (config.type == DbType.SQLSERVER && idx.unique && nullableCols.isNotEmpty()) {
+                        " WHERE " + nullableCols.joinToString(" AND ") { "${quote(it)} IS NOT NULL" }
+                    } else {
+                        ""
+                    }
+                    executeCreateOrDetectCollision(
+                        stmt,
+                        "CREATE ${keywordSql}INDEX ${quote(name)} ON ${quote(structure.name)} ($cols)$whereSql",
+                        objectLabel = "Индекс",
+                        objectName = name,
+                        ownerTable = structure.name,
+                        lookupOwner = ::existingIndexOwner,
+                    )
                 }
-                val cols = idx.columns.joinToString(", ") { quote(it) }
-                // Имя переносится как есть (только санация длины, см. safeIdentifier) — по
-                // требованию: если два разных объекта источника конфликтуют по имени на target
-                // (в Postgres/MSSQL имена индексов схемо-уникальны), это реальная проблема данных
-                // источника и должна быть видна пользователю, а не молча замаскирована префиксом.
-                val name = safeIdentifier(idx.name)
-                // MySQL/Postgres/SQLite разрешают сколько угодно NULL в UNIQUE-колонке (NULL не
-                // равен NULL для проверки уникальности) — MSSQL, наоборот, считает несколько NULL
-                // дубликатом и обычный CREATE UNIQUE INDEX падает с "duplicate key ... value is
-                // (<NULL>)" на любой таблице, где такая колонка не заполнена хотя бы дважды. Чтобы
-                // воспроизвести исходную семантику, а не терять данные и не падать, для MSSQL
-                // уникальный индекс по nullable-колонкам создаётся как filtered index (WHERE col
-                // IS NOT NULL) — уникальность проверяется только среди заполненных строк, как и на
-                // остальных диалектах.
-                val nullableCols = idx.columns.filter { columnsByName[it]?.nullable == true }
-                val whereSql = if (config.type == DbType.SQLSERVER && idx.unique && nullableCols.isNotEmpty()) {
-                    " WHERE " + nullableCols.joinToString(" AND ") { "${quote(it)} IS NOT NULL" }
-                } else {
-                    ""
+                // SQLite не поддерживает ALTER TABLE ADD CONSTRAINT CHECK — CHECK там можно задать
+                // только в момент CREATE TABLE, которое createTable() (пока) не делает; пропускаем.
+                if (config.type != DbType.SQLITE) {
+                    for (chk in structure.checkConstraints) {
+                        createCheckConstraint(stmt, structure.name, chk)
+                    }
                 }
-                executeCreateOrDetectCollision(
-                    stmt,
-                    "CREATE ${keywordSql}INDEX ${quote(name)} ON ${quote(structure.name)} ($cols)$whereSql",
-                    objectLabel = "Индекс",
-                    objectName = name,
-                    ownerTable = structure.name,
-                    lookupOwner = ::existingIndexOwner,
-                )
             }
-            // SQLite не поддерживает ALTER TABLE ADD CONSTRAINT CHECK — CHECK там можно задать
-            // только в момент CREATE TABLE, которое createTable() (пока) не делает; пропускаем.
-            if (config.type != DbType.SQLITE) {
-                for (chk in structure.checkConstraints) {
-                    createCheckConstraint(stmt, structure.name, chk)
-                }
-            }
+            connection.commit()
         }
-        connection.commit()
     }
 
     // В отличие от индексов (см. выше — там коллизия имени между разными таблицами считается
@@ -419,16 +421,51 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
         // задать только в момент CREATE TABLE. Осознанно пропускаем без ошибки: остальные
         // СУБД получают полноценные FK-constraint'ы, для SQLite это известное ограничение.
         if (foreignKeys.isEmpty() || config.type == DbType.SQLITE) return
-        connection.createStatement().use { stmt ->
-            for ((idx, fk) in foreignKeys.withIndex()) {
-                val constraintName = safeIdentifier("fk_${table}_${fk.columnName}_$idx")
-                val sql = "ALTER TABLE ${quote(table)} ADD CONSTRAINT ${quote(constraintName)} " +
-                    "FOREIGN KEY (${quote(fk.columnName)}) REFERENCES ${quote(fk.referencedTable)} (${quote(fk.referencedColumn)}) " +
-                    "ON DELETE ${actionSql(fk.onDelete)} ON UPDATE ${actionSql(fk.onUpdate)}"
-                executeIgnoringDuplicate(stmt, sql)
+        withLongRunningDdl("создание внешних ключей для $table") {
+            connection.createStatement().use { stmt ->
+                for ((idx, fk) in foreignKeys.withIndex()) {
+                    val constraintName = safeIdentifier("fk_${table}_${fk.columnName}_$idx")
+                    val sql = "ALTER TABLE ${quote(table)} ADD CONSTRAINT ${quote(constraintName)} " +
+                        "FOREIGN KEY (${quote(fk.columnName)}) REFERENCES ${quote(fk.referencedTable)} (${quote(fk.referencedColumn)}) " +
+                        "ON DELETE ${actionSql(fk.onDelete)} ON UPDATE ${actionSql(fk.onUpdate)}"
+                    executeIgnoringDuplicate(stmt, sql)
+                }
             }
+            connection.commit()
         }
-        connection.commit()
+    }
+
+    /**
+     * CREATE INDEX, ADD CHECK и ADD FOREIGN KEY на таблицах с сотнями миллионов строк могут
+     * корректно выполняться много часов, при этом сервер не отправляет JDBC-клиенту промежуточный
+     * прогресс. Общий socketTimeout нужен для обычных запросов, но здесь он ошибочно принимает
+     * длительную работу сервера за обрыв связи. Отключаем network timeout только на время таких
+     * DDL и обязательно восстанавливаем его после успеха или ошибки.
+     */
+    private fun <T> withLongRunningDdl(description: String, operation: () -> T): T {
+        if (config.type == DbType.SQLITE) return operation()
+
+        val startedAt = System.currentTimeMillis()
+        val previousTimeout = connection.networkTimeout
+        log.info(
+            "Приёмник {} ({}) — {}: отключаю сетевой таймаут на время длительной DDL " +
+                "(обычный таймаут={} мс)",
+            config.type,
+            config.database,
+            description,
+            previousTimeout,
+        )
+        return try {
+            connection.withTemporaryNetworkTimeout(0, operation)
+        } finally {
+            log.info(
+                "Приёмник {} ({}) — {} завершено за {} мс",
+                config.type,
+                config.database,
+                description,
+                System.currentTimeMillis() - startedAt,
+            )
+        }
     }
 
     // createIndexesAndConstraints()/createForeignKeys() помечаются "скопировано" только по успеху
