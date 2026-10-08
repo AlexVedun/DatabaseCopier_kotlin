@@ -94,6 +94,13 @@ tasks.withType<JavaCompile> {
     options.release.set(22)
 }
 
+tasks.processResources {
+    inputs.property("appVersion", project.version.toString())
+    filesMatching("database-copier.properties") {
+        expand("appVersion" to project.version.toString())
+    }
+}
+
 // Шаг 14: упаковка через jpackage в самодостаточный app-image (встроенный JRE, не требует
 // установленного JDK на машине пользователя). shadowJar собирает один fat-jar со всеми
 // зависимостями (включая JavaFX-модули текущей платформы, выбранные classifier-зависимостями)
