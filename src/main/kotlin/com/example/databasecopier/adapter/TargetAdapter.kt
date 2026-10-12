@@ -2,6 +2,12 @@ package com.example.databasecopier.adapter
 
 interface TargetAdapter {
     fun connect()
+    fun databaseIdentity(): DatabaseIdentity
+    fun listTables(): Set<String>
+    fun getTableStructure(table: String): TableStructure?
+    fun getForeignKeys(table: String): List<ForeignKeyRef>
+    /** Удаляет только строки, не изменяя структуру, индексы и ограничения таблицы. */
+    fun clearTableData(table: String)
     /** Подготавливает существующую схему к пересозданию [tablesToRecreate].
      *
      * Для SQL Server это отдельный обязательный шаг: NOCHECK отключает проверку данных, но не

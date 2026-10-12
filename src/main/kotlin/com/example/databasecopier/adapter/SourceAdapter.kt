@@ -4,6 +4,8 @@ import kotlinx.serialization.json.JsonElement
 
 interface SourceAdapter {
     fun connect()
+    /** null для dump-источника: у файла нет живой БД, которую можно случайно очистить. */
+    fun databaseIdentity(): DatabaseIdentity? = null
     fun listTables(): Map<String, Long?>
     fun getTableStructure(table: String): TableStructure
     fun getForeignKeys(table: String): List<ForeignKeyRef>

@@ -49,6 +49,7 @@ object CopySessionRepository {
             it[CopySessionTables.rowsTotal] = rowsTotal
             it[rowsCopied] = 0
             it[structureCopied] = false
+            it[targetDataCleared] = false
         } get CopySessionTables.id)
     }
 
@@ -134,6 +135,12 @@ object CopySessionRepository {
         }
     }
 
+    fun markTargetDataCleared(id: Int) = transaction {
+        CopySessionTables.update({ CopySessionTables.id eq id }) {
+            it[targetDataCleared] = true
+        }
+    }
+
     fun markForeignKeysCopied(id: Int) = transaction {
         CopySessionTables.update({ CopySessionTables.id eq id }) {
             it[foreignKeysCopied] = true
@@ -199,6 +206,7 @@ object CopySessionRepository {
         dataCopied = this[CopySessionTables.dataCopied],
         foreignKeysCopied = this[CopySessionTables.foreignKeysCopied],
         indexesCopied = this[CopySessionTables.indexesCopied],
+        targetDataCleared = this[CopySessionTables.targetDataCleared],
     )
 
     private fun ResultRow.toViewRecord() = CopySessionViewRecord(

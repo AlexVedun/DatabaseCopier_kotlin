@@ -13,6 +13,14 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
     private val log = LoggerFactory.getLogger(JdbcTargetAdapter::class.java)
 
     private lateinit var connection: Connection
+    private var schemaInspector: JdbcSourceAdapter? = null
+
+    override fun databaseIdentity(): DatabaseIdentity = config.databaseIdentity()
+
+    private fun inspector(): JdbcSourceAdapter = schemaInspector ?: JdbcSourceAdapter(config).also {
+        it.connect()
+        schemaInspector = it
+    }
 
     override fun connect() {
         log.info("Приёмник {} ({}:{}/{}) — подключаюсь", config.type, config.host, config.port, config.database)
@@ -612,6 +620,26 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
         }
     }
 
+    override fun listTables(): Set<String> = inspector().listTables().keys
+
+    override fun getTableStructure(table: String): TableStructure? =
+        if (tableExists(table)) inspector().getTableStructure(table) else null
+
+    override fun getForeignKeys(table: String): List<ForeignKeyRef> = inspector().getForeignKeys(table)
+
+    override fun clearTableData(table: String) {
+        // DELETE работает одинаково во всех поддерживаемых СУБД и, в отличие от TRUNCATE,
+        // сохраняет identity/sequence и не имеет диалект-зависимых запретов при наличии FK.
+        // Проверки FK на время data-only копирования отключает CopyRunner.
+        try {
+            connection.createStatement().use { it.executeUpdate("DELETE FROM ${quote(table)}") }
+            connection.commit()
+        } catch (e: Exception) {
+            connection.rollback()
+            throw e
+        }
+    }
+
     override fun disableForeignKeyChecks() {
         when (config.type) {
             DbType.MYSQL -> connection.createStatement().use { it.execute("SET FOREIGN_KEY_CHECKS=0") }
@@ -692,6 +720,8 @@ class JdbcTargetAdapter(private val config: ConnectionConfig) : TargetAdapter {
     )
 
     override fun close() {
+        schemaInspector?.close()
+        schemaInspector = null
         if (::connection.isInitialized) connection.close()
     }
 }

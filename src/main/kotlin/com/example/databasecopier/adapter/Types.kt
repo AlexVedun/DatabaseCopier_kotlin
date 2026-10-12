@@ -1,6 +1,7 @@
 package com.example.databasecopier.adapter
 
 import kotlinx.serialization.json.JsonElement
+import java.io.File
 
 enum class DbType { MYSQL, POSTGRESQL, SQLSERVER, SQLITE }
 
@@ -11,6 +12,25 @@ data class ConnectionConfig(
     val database: String,
     val username: String? = null,
     val password: String? = null,
+) {
+    fun databaseIdentity(): DatabaseIdentity = DatabaseIdentity(
+        type = type,
+        host = if (type == DbType.SQLITE) null else host?.trim()?.lowercase(),
+        port = port ?: when (type) {
+            DbType.MYSQL -> 3306
+            DbType.POSTGRESQL -> 5432
+            DbType.SQLSERVER -> 1433
+            DbType.SQLITE -> null
+        },
+        database = if (type == DbType.SQLITE) File(database).canonicalFile.path else database.trim().lowercase(),
+    )
+}
+
+data class DatabaseIdentity(
+    val type: DbType,
+    val host: String?,
+    val port: Int?,
+    val database: String,
 )
 
 enum class LogicalType { INTEGER, BIGINT, VARCHAR, TEXT, DECIMAL, BOOLEAN, DATE, DATETIME, JSON, UUID, BLOB }
@@ -32,6 +52,11 @@ data class ColumnDef(
     // фиксированный VARCHAR(255) для любой длины источника, что либо раздувало составные индексы
     // на target сверх лимита длины ключа СУБД, либо (для VARCHAR(256+) источника) обрезало данные.
     val length: Int? = null,
+    // Generated/computed column target нельзя явно указывать в INSERT. В data-only режиме это
+    // часть проверки совместимости: совпадающая по имени source-колонка привела бы к ошибке.
+    val generated: Boolean = false,
+    val numericPrecision: Int? = null,
+    val numericScale: Int? = null,
 )
 
 // FULLTEXT/SPATIAL индексы не имеют обычного ограничения на длину ключа (в отличие от BTREE) —

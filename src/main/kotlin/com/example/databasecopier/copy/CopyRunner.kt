@@ -3,6 +3,7 @@ package com.example.databasecopier.copy
 import com.example.databasecopier.adapter.RoutineKind
 import com.example.databasecopier.adapter.RoutineRef
 import com.example.databasecopier.adapter.SourceAdapter
+import com.example.databasecopier.adapter.TableStructure
 import com.example.databasecopier.adapter.TargetAdapter
 import com.example.databasecopier.session.CopySessionRepository
 import com.example.databasecopier.session.CopySessionTableRecord
@@ -32,8 +33,10 @@ class CopyRunner {
 
     suspend fun run(sessionId: Int, source: SourceAdapter, target: TargetAdapter) = withContext(Dispatchers.IO) {
         val session = CopySessionRepository.getSession(sessionId) ?: return@withContext
-        val needsStructure = true // оба режима (structure_only/structure_and_data) копируют структуру
-        val needsData = session.copyMode == "structure_and_data"
+        val dataOnlyReplace = session.copyMode == CopyMode.DATA_ONLY_REPLACE
+        val needsStructure = !dataOnlyReplace
+        val needsData = session.copyMode != CopyMode.STRUCTURE_ONLY
+        var dataOnlyForeignKeyChecksDisabled = false
 
         log.info("Сессия {}: старт, таблиц выбрано={}, needsData={}", sessionId, CopySessionRepository.getTables(sessionId).count { it.isSelected }, needsData)
         try {
@@ -42,8 +45,15 @@ class CopyRunner {
             log.info("Сессия {}: к копированию осталось {} из {} таблиц", sessionId, pending.size, allSelected.size)
 
             val selectedNames = allSelected.map { it.tableName }.toSet()
+            // В data-only режиме любая ошибка проверки должна быть найдена ДО первого DELETE.
+            // Сохраняем структуры в памяти и используем их повторно в основном цикле.
+            val validatedSourceStructures = if (dataOnlyReplace) {
+                validateDataOnlyCopy(source, target, selectedNames)
+            } else {
+                emptyMap()
+            }
             val tablesToRecreate = pending.filter { !it.structureCopied }.map { it.tableName }.toSet()
-            if (tablesToRecreate.isNotEmpty()) {
+            if (needsStructure && tablesToRecreate.isNotEmpty()) {
                 log.debug("Сессия {}: подготавливаю {} таблиц к пересозданию", sessionId, tablesToRecreate.size)
                 target.prepareTableRecreation(selectedNames, tablesToRecreate)
             }
@@ -52,6 +62,7 @@ class CopyRunner {
             // включаются обратно только по успешном завершении всей сессии, см. Шаг 4/9 инструкции).
             log.debug("Сессия {}: отключаю проверку внешних ключей на приёмнике", sessionId)
             target.disableForeignKeyChecks()
+            dataOnlyForeignKeyChecksDisabled = dataOnlyReplace
 
             for (table in pending) {
                 if (!isRunnable(sessionId)) {
@@ -62,7 +73,8 @@ class CopyRunner {
                 var current = table
                 log.info("Сессия {}: таблица {} — читаю структуру из источника", sessionId, current.tableName)
                 val structureStart = System.currentTimeMillis()
-                val structure = source.getTableStructure(current.tableName)
+                val structure = validatedSourceStructures[current.tableName]
+                    ?: source.getTableStructure(current.tableName)
                 log.info(
                     "Сессия {}: таблица {} — структура получена за {} мс, колонок={}",
                     sessionId, current.tableName, System.currentTimeMillis() - structureStart, structure.columns.size,
@@ -82,6 +94,12 @@ class CopyRunner {
                 // полностью скопирована) читал бы с начала и падал на дубликате PK при вставке
                 // уже скопированных строк.
                 if (needsData && !current.dataCopied) {
+                    if (dataOnlyReplace && !current.targetDataCleared) {
+                        log.info("Сессия {}: таблица {} — удаляю существующие строки на приёмнике", sessionId, current.tableName)
+                        target.clearTableData(current.tableName)
+                        CopySessionRepository.markTargetDataCleared(current.id)
+                        current = current.copy(targetDataCleared = true)
+                    }
                     // Каталожная оценка, полученная при проверке подключения, позволяет быстро
                     // показать список даже для БД на сотни гигабайт. Перед копированием адаптер
                     // уточняет её через COUNT(*) только когда это не должно надолго задержать
@@ -107,7 +125,7 @@ class CopyRunner {
 
                 // Индексы/CHECK создаются после загрузки данных (быстрее, чем поддерживать индекс
                 // при каждой вставке батча) — для structure_only режима данных нет, создаются сразу.
-                if (!current.indexesCopied) {
+                if (needsStructure && !current.indexesCopied) {
                     log.info("Сессия {}: таблица {} — создаю индексы/CHECK-констрейнты", sessionId, current.tableName)
                     target.createIndexesAndConstraints(structure)
                     CopySessionRepository.markIndexesCopied(current.id)
@@ -117,6 +135,14 @@ class CopyRunner {
                 CopySessionRepository.updateTableStatus(current.id, "done")
                 log.info("Сессия {}: таблица {} — готово", sessionId, current.tableName)
                 emit(sessionId, current.copy(status = "done"))
+            }
+
+            if (dataOnlyReplace) {
+                target.enableForeignKeyChecks()
+                dataOnlyForeignKeyChecksDisabled = false
+                CopySessionRepository.updateSessionStatus(sessionId, "completed")
+                log.info("Сессия {}: data-only копирование завершено успешно", sessionId)
+                return@withContext
             }
 
             // FK создаются отдельным проходом ПОСЛЕ того, как все выбранные таблицы гарантированно
@@ -192,7 +218,60 @@ class CopyRunner {
         } catch (e: Exception) {
             log.error("Сессия {}: упала с ошибкой", sessionId, e)
             CopySessionRepository.updateSessionStatus(sessionId, "failed", lastError = e.message)
+        } finally {
+            // В SQL Server NOCHECK сохраняется после закрытия соединения, поэтому data-only режим
+            // обязан вернуть проверки даже при ошибке/паузе. На остальных СУБД это также оставляет
+            // подключение в безопасном состоянии до его закрытия вызывающей стороной.
+            if (dataOnlyForeignKeyChecksDisabled) {
+                runCatching { target.enableForeignKeyChecks() }
+                    .onFailure { log.error("Сессия {}: не удалось повторно включить проверки FK", sessionId, it) }
+            }
         }
+    }
+
+    private fun validateDataOnlyCopy(
+        source: SourceAdapter,
+        target: TargetAdapter,
+        selectedNames: Set<String>,
+    ): Map<String, TableStructure> {
+        val sourceIdentity = source.databaseIdentity()
+        require(sourceIdentity == null || sourceIdentity != target.databaseIdentity()) {
+            "Data-only copy is not allowed when source and target are the same database"
+        }
+
+        val errors = mutableListOf<String>()
+        val sourceStructures = linkedMapOf<String, TableStructure>()
+        for (table in selectedNames.sorted()) {
+            val sourceStructure = source.getTableStructure(table)
+            sourceStructures[table] = sourceStructure
+            val targetStructure = target.getTableStructure(table)
+            if (targetStructure == null) {
+                errors += "$table: table does not exist in target"
+                continue
+            }
+            errors += TableCompatibilityValidator.validate(sourceStructure, targetStructure)
+                .map { "$table: $it" }
+        }
+
+        // Любой FK через границу выбранного набора делает безопасную очистку/замену недоказуемой:
+        // либо очистка родителя оставит внешнюю невыбранную таблицу с осиротевшими ссылками, либо
+        // новые строки выбранного ребёнка могут не существовать в неизменённом родителе.
+        for (childTable in target.listTables().sorted()) {
+            for (foreignKey in target.getForeignKeys(childTable)) {
+                val childSelected = childTable in selectedNames
+                val parentSelected = foreignKey.referencedTable in selectedNames
+                if (childSelected != parentSelected) {
+                    errors += "$childTable.${foreignKey.columnName}: foreign key crosses the selected table boundary " +
+                        "to ${foreignKey.referencedTable}.${foreignKey.referencedColumn}"
+                }
+            }
+        }
+
+        check(errors.isEmpty()) {
+            "Data-only compatibility check failed:\n" + errors.joinToString("\n") { "- $it" }
+        }
+        log.info("Data-only compatibility check passed for {} tables", selectedNames.size)
+        return sourceStructures
     }
 
     /** Возвращает обновлённую запись таблицы, либо null если копирование было приостановлено/отменено. */

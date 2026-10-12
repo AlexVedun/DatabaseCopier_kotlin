@@ -417,4 +417,178 @@ class CopyRunnerTest {
         assertEquals(0L, table.rowsCopied)
         assertEquals("paused", CopySessionRepository.getSession(sessionId)!!.status)
     }
+
+    @Test
+    fun `data only mode preserves schema and replaces existing rows`() = runBlocking {
+        DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { conn ->
+            conn.createStatement().use { stmt ->
+                stmt.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, value VARCHAR(255) NOT NULL, target_note TEXT NULL)")
+                stmt.execute("INSERT INTO items (id, value, target_note) VALUES (999, 'stale', 'keep-column')")
+            }
+        }
+        val sessionId = CopySessionRepository.createSession(
+            name = "data-only session",
+            sourceType = "connection",
+            sourceConnectionId = null,
+            sourceDumpPath = null,
+            sourceDumpDialect = null,
+            targetConnectionId = 1,
+            copyMode = CopyMode.DATA_ONLY_REPLACE,
+            batchSize = batchSize,
+        )
+        CopySessionRepository.addTable(sessionId, "items")
+        CopySessionRepository.updateSessionStatus(sessionId, "running")
+
+        val source = JdbcSourceAdapter(sourceConfig).apply { connect() }
+        val target = JdbcTargetAdapter(targetConfig).apply { connect() }
+        try {
+            CopyRunner().run(sessionId, source, target)
+        } finally {
+            source.close()
+            target.close()
+        }
+
+        assertEquals("completed", CopySessionRepository.getSession(sessionId)!!.status)
+        assertTrue(CopySessionRepository.getTables(sessionId).single().targetDataCleared)
+        DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { conn ->
+            conn.createStatement().use { stmt ->
+                stmt.executeQuery("SELECT COUNT(*), COUNT(target_note) FROM items").use { rs ->
+                    rs.next()
+                    assertEquals(totalRows, rs.getInt(1))
+                    assertEquals(0, rs.getInt(2))
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `data only mode validates every table before deleting target rows`() = runBlocking {
+        DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { conn ->
+            conn.createStatement().use { stmt ->
+                stmt.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, value VARCHAR(10) NOT NULL)")
+                stmt.execute("INSERT INTO items (id, value) VALUES (999, 'stale')")
+            }
+        }
+        val sessionId = CopySessionRepository.createSession(
+            name = "incompatible data-only session",
+            sourceType = "connection",
+            sourceConnectionId = null,
+            sourceDumpPath = null,
+            sourceDumpDialect = null,
+            targetConnectionId = 1,
+            copyMode = CopyMode.DATA_ONLY_REPLACE,
+            batchSize = batchSize,
+        )
+        CopySessionRepository.addTable(sessionId, "items")
+        CopySessionRepository.updateSessionStatus(sessionId, "running")
+
+        val source = JdbcSourceAdapter(sourceConfig).apply { connect() }
+        val target = JdbcTargetAdapter(targetConfig).apply { connect() }
+        try {
+            CopyRunner().run(sessionId, source, target)
+        } finally {
+            source.close()
+            target.close()
+        }
+
+        val session = CopySessionRepository.getSession(sessionId)!!
+        assertEquals("failed", session.status)
+        assertTrue(session.lastError!!.contains("compatibility check failed"))
+        assertFalse(CopySessionRepository.getTables(sessionId).single().targetDataCleared)
+        DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { conn ->
+            conn.createStatement().use { stmt ->
+                stmt.executeQuery("SELECT value FROM items WHERE id = 999").use { rs ->
+                    assertTrue(rs.next())
+                    assertEquals("stale", rs.getString(1))
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `resumed data only mode does not clear an already started table again`() = runBlocking {
+        DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { conn ->
+            conn.createStatement().use { it.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, value VARCHAR(255) NOT NULL)") }
+        }
+        val sessionId = CopySessionRepository.createSession(
+            name = "resumed data-only session",
+            sourceType = "connection",
+            sourceConnectionId = null,
+            sourceDumpPath = null,
+            sourceDumpDialect = null,
+            targetConnectionId = 1,
+            copyMode = CopyMode.DATA_ONLY_REPLACE,
+            batchSize = batchSize,
+        )
+        val tableId = CopySessionRepository.addTable(sessionId, "items")
+
+        val firstSource = JdbcSourceAdapter(sourceConfig).apply { connect() }
+        val firstTarget = JdbcTargetAdapter(targetConfig).apply { connect() }
+        try {
+            firstTarget.clearTableData("items")
+            CopySessionRepository.markTargetDataCleared(tableId)
+            val firstBatch = firstSource.readBatch("items", null, batchSize)
+            firstTarget.insertBatch("items", firstBatch.rows)
+            CopySessionRepository.updateTableProgress(tableId, firstBatch.rows.size.toLong(), firstBatch.nextCursor.toString())
+            CopySessionRepository.updateTableStatus(tableId, "in_progress")
+        } finally {
+            firstSource.close()
+            firstTarget.close()
+        }
+        CopySessionRepository.updateSessionStatus(sessionId, "running")
+
+        val source = JdbcSourceAdapter(sourceConfig).apply { connect() }
+        val target = JdbcTargetAdapter(targetConfig).apply { connect() }
+        try {
+            CopyRunner().run(sessionId, source, target)
+        } finally {
+            source.close()
+            target.close()
+        }
+
+        assertEquals("completed", CopySessionRepository.getSession(sessionId)!!.status)
+        DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { conn ->
+            conn.createStatement().use { stmt ->
+                stmt.executeQuery("SELECT COUNT(*) FROM items").use { rs ->
+                    rs.next()
+                    assertEquals(totalRows, rs.getInt(1))
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `data only mode rejects identical source and target database`() = runBlocking {
+        val sessionId = CopySessionRepository.createSession(
+            name = "same database session",
+            sourceType = "connection",
+            sourceConnectionId = null,
+            sourceDumpPath = null,
+            sourceDumpDialect = null,
+            targetConnectionId = 1,
+            copyMode = CopyMode.DATA_ONLY_REPLACE,
+            batchSize = batchSize,
+        )
+        CopySessionRepository.addTable(sessionId, "items")
+        CopySessionRepository.updateSessionStatus(sessionId, "running")
+
+        val source = JdbcSourceAdapter(sourceConfig).apply { connect() }
+        val target = JdbcTargetAdapter(sourceConfig).apply { connect() }
+        try {
+            CopyRunner().run(sessionId, source, target)
+        } finally {
+            source.close()
+            target.close()
+        }
+
+        assertEquals("failed", CopySessionRepository.getSession(sessionId)!!.status)
+        DriverManager.getConnection(mysql.jdbcUrl, mysql.username, mysql.password).use { conn ->
+            conn.createStatement().use { stmt ->
+                stmt.executeQuery("SELECT COUNT(*) FROM items").use { rs ->
+                    rs.next()
+                    assertEquals(totalRows, rs.getInt(1))
+                }
+            }
+        }
+    }
 }

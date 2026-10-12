@@ -29,7 +29,7 @@ object CopySessions : Table("copy_sessions") {
     val sourceDumpPath = varchar("source_dump_path", 1024).nullable()
     val sourceDumpDialect = varchar("source_dump_dialect", 20).nullable() // mysql/postgresql
     val targetConnectionId = integer("target_connection_id").references(Connections.id)
-    val copyMode = varchar("copy_mode", 30) // structure_only/structure_and_data
+    val copyMode = varchar("copy_mode", 30) // structure_only/structure_and_data/data_only_replace
     val batchSize = integer("batch_size").default(1000)
     val lastError = text("last_error").nullable()
     val createdAt = long("created_at")
@@ -51,6 +51,9 @@ object CopySessionTables : Table("copy_session_tables") {
     val dataCopied = bool("data_copied").default(false)
     val foreignKeysCopied = bool("foreign_keys_copied").default(false)
     val indexesCopied = bool("indexes_copied").default(false)
+    // Для data_only_replace отделено от cursorJson: null-курсор бывает и до начала, и после EOF.
+    // После resume уже очищенную и частично заполненную таблицу повторно очищать нельзя.
+    val targetDataCleared = bool("target_data_cleared").default(false)
 
     override val primaryKey = PrimaryKey(id)
 }

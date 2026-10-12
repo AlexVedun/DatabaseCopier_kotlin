@@ -4,6 +4,7 @@ import com.example.databasecopier.AppScope
 import com.example.databasecopier.adapter.ConnectionConfig
 import com.example.databasecopier.adapter.DbType
 import com.example.databasecopier.adapter.JdbcTargetAdapter
+import com.example.databasecopier.copy.CopyMode
 import com.example.databasecopier.i18n.Messages
 import javafx.beans.property.SimpleBooleanProperty
 import javafx.geometry.Insets
@@ -28,6 +29,9 @@ class TargetPanelController {
         toggleGroup = this@TargetPanelController.toggleGroup
         isSelected = true
     }
+    private val dataOnlyReplaceRadio = RadioButton(Messages.get("target.mode.dataOnlyReplace")).apply {
+        toggleGroup = this@TargetPanelController.toggleGroup
+    }
 
     private val batchSizeSpinner = Spinner<Int>(1, Int.MAX_VALUE, 1000, 100).apply { isEditable = true }
 
@@ -51,7 +55,7 @@ class TargetPanelController {
         8.0,
         Label(Messages.get("target.title")),
         picker.row,
-        HBox(8.0, structureOnlyRadio, structureAndDataRadio),
+        VBox(4.0, structureOnlyRadio, structureAndDataRadio, dataOnlyReplaceRadio),
         HBox(8.0, Label(Messages.get("target.batchSize")).apply { minWidth = 90.0 }, batchSizeSpinner),
     ).apply { padding = Insets(8.0) }
 
@@ -59,7 +63,11 @@ class TargetPanelController {
         picker.testButton.setOnAction { testConnection() }
     }
 
-    fun copyMode(): String = if (structureOnlyRadio.isSelected) "structure_only" else "structure_and_data"
+    fun copyMode(): String = when {
+        structureOnlyRadio.isSelected -> CopyMode.STRUCTURE_ONLY
+        dataOnlyReplaceRadio.isSelected -> CopyMode.DATA_ONLY_REPLACE
+        else -> CopyMode.STRUCTURE_AND_DATA
+    }
 
     fun batchSize(): Int = batchSizeSpinner.value
 

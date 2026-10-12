@@ -2,6 +2,7 @@ package com.example.databasecopier.dump
 
 import com.example.databasecopier.adapter.ColumnDef
 import com.example.databasecopier.adapter.ForeignKeyRef
+import com.example.databasecopier.adapter.LogicalType
 import com.example.databasecopier.adapter.ReferentialAction
 import com.example.databasecopier.adapter.TableStructure
 import com.example.databasecopier.adapter.TypeMapper
@@ -82,14 +83,26 @@ object CreateTableParser {
                     val sqlType = colMatch.groupValues[2]
                     val typeArgs = colMatch.groupValues[3].trim()
                     val length = typeArgs.takeIf { VARCHAR_LENGTH_REGEX.matches(it) }?.toIntOrNull()
+                    val logicalType = TypeMapper.fromSqlType(dbType, sqlType)
+                    val decimalShape = if (logicalType == LogicalType.DECIMAL) {
+                        typeArgs.split(',').map { it.trim().toIntOrNull() }
+                            .takeIf { it.size == 2 && it.all { value -> value != null } }
+                    } else null
                     val nullable = !upper.contains("NOT NULL")
                     if (upper.contains("PRIMARY KEY")) primaryKey.add(colName)
                     val autoIncrement = upper.contains("AUTO_INCREMENT") || upper.contains("AUTOINCREMENT") ||
                         sqlType.lowercase() in SERIAL_TYPES
                     val defaultValue = if (autoIncrement) null else DEFAULT_REGEX.find(entry)?.groupValues?.get(1)
-                    columns.add(
-                        ColumnDef(colName, TypeMapper.fromSqlType(dbType, sqlType), nullable, autoIncrement, defaultValue, length = length)
-                    )
+                    columns.add(ColumnDef(
+                        name = colName,
+                        type = logicalType,
+                        nullable = nullable,
+                        autoIncrement = autoIncrement,
+                        defaultValue = defaultValue,
+                        length = length,
+                        numericPrecision = decimalShape?.get(0),
+                        numericScale = decimalShape?.get(1),
+                    ))
                 }
             }
         }

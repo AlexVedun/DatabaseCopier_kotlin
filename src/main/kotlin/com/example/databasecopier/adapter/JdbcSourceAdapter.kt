@@ -24,9 +24,12 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
         // её как часть строки, например "VARCHAR(100)") — извлекаем тем же способом, что и для
         // дампов, см. CreateTableParser.
         private val VARCHAR_LENGTH_REGEX = Regex("""(?i)^(?:varchar|char)\s*\((\d+)\)""")
+        private val DECIMAL_SHAPE_REGEX = Regex("""(?i)^(?:decimal|numeric)\s*\((\d+)\s*,\s*(\d+)\)""")
     }
 
     private lateinit var connection: Connection
+
+    override fun databaseIdentity(): DatabaseIdentity = config.databaseIdentity()
 
     override fun connect() {
         log.info("Источник {} ({}:{}/{}) — подключаюсь", config.type, config.host, config.port, config.database)
@@ -266,21 +269,23 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
         if (config.type == DbType.SQLITE) return@withConnectionRetry getSqliteTableStructure(table)
 
         val identityColumns = if (config.type == DbType.SQLSERVER) readMssqlIdentityColumns(table) else emptySet()
+        val computedColumns = if (config.type == DbType.SQLSERVER) readMssqlComputedColumns(table) else emptySet()
         val columnComments = getColumnComments(table)
         val columns = mutableListOf<ColumnDef>()
-        val columnsSql = if (config.type == DbType.MYSQL) {
-            // column_type (а не только data_type) нужен, чтобы отличить tinyint(1) от прочих
-            // tinyint — data_type для обоих просто "tinyint", теряя ширину. Это важно, потому что
-            // mysql-connector-j по умолчанию (tinyInt1isBit=true) читает значения tinyint(1) как
-            // Boolean через getObject(), а не Int — если TypeMapper классифицирует такую колонку
-            // как INTEGER (как это было раньше), target-колонка создаётся INTEGER, но в неё летят
-            // Boolean-значения, и JDBC-драйвер target'а падает с "column is of type X but expression
-            // is of type boolean" (например Postgres).
-            "SELECT column_name, data_type, column_type, is_nullable, extra, column_default, collation_name, character_maximum_length " +
-                "FROM information_schema.columns WHERE table_name = ? AND ${schemaClause()} ORDER BY ordinal_position"
-        } else {
-            "SELECT column_name, data_type, is_nullable, column_default, collation_name, character_maximum_length " +
-                "FROM information_schema.columns WHERE table_name = ? AND ${schemaClause()} ORDER BY ordinal_position"
+        val columnsSql = when (config.type) {
+            DbType.MYSQL -> {
+                // column_type (а не только data_type) нужен, чтобы отличить tinyint(1) от прочих
+                // tinyint — data_type для обоих просто "tinyint", теряя ширину. Это важно, потому
+                // что mysql-connector-j читает tinyint(1) как Boolean через getObject().
+                "SELECT column_name, data_type, column_type, is_nullable, extra, column_default, collation_name, character_maximum_length, numeric_precision, numeric_scale " +
+                    "FROM information_schema.columns WHERE table_name = ? AND ${schemaClause()} ORDER BY ordinal_position"
+            }
+            DbType.POSTGRESQL ->
+                "SELECT column_name, data_type, is_nullable, column_default, collation_name, character_maximum_length, numeric_precision, numeric_scale, is_generated " +
+                    "FROM information_schema.columns WHERE table_name = ? AND ${schemaClause()} ORDER BY ordinal_position"
+            else ->
+                "SELECT column_name, data_type, is_nullable, column_default, collation_name, character_maximum_length, numeric_precision, numeric_scale " +
+                    "FROM information_schema.columns WHERE table_name = ? AND ${schemaClause()} ORDER BY ordinal_position"
         }
         connection.prepareStatement(columnsSql).use { ps ->
             ps.setString(1, table)
@@ -313,6 +318,14 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
                             // VARCHAR (для которого только и значим length) и просто отбрасываются.
                             length = rs.getLong("character_maximum_length")
                                 .takeIf { !rs.wasNull() && it in 1..Int.MAX_VALUE }?.toInt(),
+                            generated = when (config.type) {
+                                DbType.MYSQL -> rs.getString("extra")?.contains("generated", ignoreCase = true) == true
+                                DbType.POSTGRESQL -> !rs.getString("is_generated").equals("NEVER", ignoreCase = true)
+                                DbType.SQLSERVER -> name in computedColumns
+                                DbType.SQLITE -> false
+                            },
+                            numericPrecision = rs.getInt("numeric_precision").takeIf { !rs.wasNull() },
+                            numericScale = rs.getInt("numeric_scale").takeIf { !rs.wasNull() },
                         )
                     )
                 }
@@ -624,10 +637,10 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
 
     /** SQLite не поддерживает `information_schema` — структура читается через `PRAGMA table_info`. */
     private fun getSqliteTableStructure(table: String): TableStructure {
-        data class Raw(val name: String, val type: String, val notNull: Boolean, val default: String?, val pk: Int)
+        data class Raw(val name: String, val type: String, val notNull: Boolean, val default: String?, val pk: Int, val hidden: Int)
         val raws = mutableListOf<Raw>()
         connection.createStatement().use { stmt ->
-            stmt.executeQuery("PRAGMA table_info(${quote(table)})").use { rs ->
+            stmt.executeQuery("PRAGMA table_xinfo(${quote(table)})").use { rs ->
                 while (rs.next()) {
                     raws.add(
                         Raw(
@@ -636,6 +649,7 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
                             notNull = rs.getInt("notnull") != 0,
                             default = rs.getString("dflt_value"),
                             pk = rs.getInt("pk"),
+                            hidden = rs.getInt("hidden"),
                         )
                     )
                 }
@@ -653,6 +667,9 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
                 autoIncrement = autoIncrement,
                 defaultValue = if (autoIncrement) null else r.default,
                 length = VARCHAR_LENGTH_REGEX.find(r.type)?.groupValues?.get(1)?.toIntOrNull(),
+                generated = r.hidden == 2 || r.hidden == 3,
+                numericPrecision = DECIMAL_SHAPE_REGEX.find(r.type)?.groupValues?.get(1)?.toIntOrNull(),
+                numericScale = DECIMAL_SHAPE_REGEX.find(r.type)?.groupValues?.get(2)?.toIntOrNull(),
             )
         }
         val primaryKey = raws.filter { it.pk > 0 }.sortedBy { it.pk }.map { it.name }
@@ -697,6 +714,17 @@ class JdbcSourceAdapter(private val config: ConnectionConfig) : SourceAdapter {
     private fun readMssqlIdentityColumns(table: String): Set<String> {
         val result = mutableSetOf<String>()
         val sql = "SELECT c.name FROM sys.identity_columns c JOIN sys.tables t ON c.object_id = t.object_id WHERE t.name = ?"
+        connection.prepareStatement(sql).use { ps ->
+            ps.setString(1, table)
+            ps.executeQuery().use { rs -> while (rs.next()) result.add(rs.getString("name")) }
+        }
+        return result
+    }
+
+    private fun readMssqlComputedColumns(table: String): Set<String> {
+        val result = mutableSetOf<String>()
+        val sql = "SELECT c.name FROM sys.columns c JOIN sys.tables t ON c.object_id = t.object_id " +
+            "WHERE t.name = ? AND c.is_computed = 1"
         connection.prepareStatement(sql).use { ps ->
             ps.setString(1, table)
             ps.executeQuery().use { rs -> while (rs.next()) result.add(rs.getString("name")) }

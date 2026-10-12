@@ -8,6 +8,7 @@ import com.example.databasecopier.adapter.SourceAdapter
 import com.example.databasecopier.connection.ConnectionRepository
 import com.example.databasecopier.copy.CopyProgressEvent
 import com.example.databasecopier.copy.CopyRunner
+import com.example.databasecopier.copy.CopyMode
 import com.example.databasecopier.dump.DumpDialect
 import com.example.databasecopier.dump.MysqlDumpSourceAdapter
 import com.example.databasecopier.dump.PostgresDumpSourceAdapter
@@ -16,6 +17,7 @@ import com.example.databasecopier.session.CopySessionRepository
 import javafx.geometry.Insets
 import javafx.scene.control.Alert
 import javafx.scene.control.Button
+import javafx.scene.control.ButtonType
 import javafx.scene.control.Label
 import javafx.scene.control.ProgressBar
 import javafx.scene.layout.HBox
@@ -91,6 +93,16 @@ class ProgressPanelController(
             showError(Messages.get("progress.error.noTables"))
             return
         }
+        val copyMode = target.copyMode()
+        if (copyMode == CopyMode.DATA_ONLY_REPLACE) {
+            val confirmation = Alert(
+                Alert.AlertType.CONFIRMATION,
+                Messages.get("progress.confirm.dataOnlyReplace", tables.size),
+                ButtonType.YES,
+                ButtonType.NO,
+            ).apply { title = Messages.get("progress.confirm.dataOnlyReplace.title") }
+            if (confirmation.showAndWait().orElse(ButtonType.NO) != ButtonType.YES) return
+        }
 
         val sourceName = when (selection) {
             is SourceSelection.Connection -> selection.config.database
@@ -103,13 +115,15 @@ class ProgressPanelController(
             sourceDumpPath = (selection as? SourceSelection.Dump)?.file?.absolutePath,
             sourceDumpDialect = (selection as? SourceSelection.Dump)?.dialect?.name?.lowercase(),
             targetConnectionId = targetConnId,
-            copyMode = target.copyMode(),
+            copyMode = copyMode,
             batchSize = target.batchSize(),
         )
         tables.forEach { CopySessionRepository.addTable(newSessionId, it, rowsTotal = source.rowsTotalFor(it)) }
-        source.selectedViews().forEach { CopySessionRepository.addView(newSessionId, it, isSelected = true) }
-        source.selectedRoutines().forEach {
-            CopySessionRepository.addRoutine(newSessionId, it.name, it.kind.name.lowercase(), isSelected = true)
+        if (copyMode != CopyMode.DATA_ONLY_REPLACE) {
+            source.selectedViews().forEach { CopySessionRepository.addView(newSessionId, it, isSelected = true) }
+            source.selectedRoutines().forEach {
+                CopySessionRepository.addRoutine(newSessionId, it.name, it.kind.name.lowercase(), isSelected = true)
+            }
         }
 
         launchCopy(newSessionId, source.createAdapter(), targetConfig, tables.size)

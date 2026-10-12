@@ -14,6 +14,11 @@ between different DBMS engines, or from a raw SQL dump file into a live database
 - **Structure copy**: tables, columns (with correct type mapping per target
   dialect), primary keys, indexes (including `FULLTEXT`/`SPATIAL`), `CHECK`
   constraints, foreign keys and views.
+- **Data-only replacement**: keep the existing target schema, delete its rows,
+  and copy fresh source data. Before deleting anything, the app validates every
+  selected table (columns, safe type conversions, nullability, keys, unique and
+  check constraints, generated columns, and foreign-key boundaries). The mode
+  is resumable and never clears an already started table a second time.
 - **Resumable sessions**: copy progress (per-table cursor, row counts, which
   stage of each table is done) is persisted to a local SQLite database, so a
   paused, cancelled, or crashed session can be resumed from where it left off

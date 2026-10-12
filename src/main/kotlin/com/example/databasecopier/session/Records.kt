@@ -9,7 +9,7 @@ data class CopySessionRecord(
     val sourceDumpPath: String?,
     val sourceDumpDialect: String?,
     val targetConnectionId: Int,
-    val copyMode: String, // structure_only/structure_and_data
+    val copyMode: String, // structure_only/structure_and_data/data_only_replace
     val batchSize: Int,
     val lastError: String?,
     val updatedAt: Long,
@@ -28,6 +28,7 @@ data class CopySessionTableRecord(
     val dataCopied: Boolean,
     val foreignKeysCopied: Boolean,
     val indexesCopied: Boolean,
+    val targetDataCleared: Boolean,
 )
 
 data class CopySessionViewRecord(
