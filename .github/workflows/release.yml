@@ -9,10 +9,10 @@ on:
       - "v[0-9]*"
   workflow_dispatch:
     inputs:
-      version:
-        description: Numeric package version (for example, 1.2.3)
+      release_tag:
+        description: Existing version tag (for example, v1.2.7). Packages are built from the selected branch.
         required: true
-        default: 1.1.1
+        type: string
 
 permissions:
   contents: read
@@ -23,22 +23,36 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       value: ${{ steps.version.outputs.value }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - name: Validate version
         id: version
         env:
-          MANUAL_VERSION: ${{ inputs.version }}
+          MANUAL_TAG: ${{ inputs.release_tag }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
-            raw_version="$GITHUB_REF_NAME"
+            release_tag="$GITHUB_REF_NAME"
           else
-            raw_version="$MANUAL_VERSION"
+            release_tag="$MANUAL_TAG"
           fi
-          version="${raw_version#v}"
+          version="${release_tag#v}"
           if [[ ! "$version" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
-            echo "Package version must contain one to three numeric components: $raw_version" >&2
+            echo "Release tag must contain one to three numeric components: $release_tag" >&2
             exit 1
           fi
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            if ! gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$release_tag" --silent; then
+              echo "Release tag does not exist: $release_tag" >&2
+              exit 1
+            fi
+            compare_status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$release_tag...$GITHUB_SHA" --jq '.status')
+            if [[ "$compare_status" != "ahead" && "$compare_status" != "identical" ]]; then
+              echo "Selected branch must contain tag $release_tag (comparison: $compare_status)" >&2
+              exit 1
+            fi
+          fi
+          echo "tag=$release_tag" >> "$GITHUB_OUTPUT"
           echo "value=$version" >> "$GITHUB_OUTPUT"
 
   test:
@@ -141,8 +155,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Create GitHub Release
-    if: github.event_name == 'push'
+    name: Create or update GitHub Release
     needs: [version, linux, windows, macos]
     runs-on: ubuntu-24.04
     permissions:
@@ -157,9 +170,26 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
           RELEASE_VERSION: ${{ needs.version.outputs.value }}
-        run: >-
-          gh release create "$RELEASE_TAG" release-assets/*
-          --title "$RELEASE_VERSION"
-          --generate-notes
+        run: |
+          recovery_note="Recovery packages built from commit $GITHUB_SHA. The existing tag remains unchanged."
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-assets/* --clobber
+            if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+              existing_notes=$(gh release view "$RELEASE_TAG" --json body --jq '.body')
+              if [[ "$existing_notes" == *"$recovery_note"* ]]; then
+                gh release edit "$RELEASE_TAG" --draft=false
+              else
+                gh release edit "$RELEASE_TAG" --draft=false --notes "$recovery_note"$'\n\n'"$existing_notes"
+              fi
+            else
+              gh release edit "$RELEASE_TAG" --draft=false
+            fi
+          else
+            args=(--verify-tag --title "$RELEASE_VERSION" --generate-notes)
+            if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+              args+=(--notes "$recovery_note")
+            fi
+            gh release create "$RELEASE_TAG" release-assets/* "${args[@]}"
+          fi

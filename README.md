@@ -95,9 +95,15 @@ a numeric version tag such as `v1.2.3` starts the workflow. If every test and pa
 build succeeds, the workflow creates a GitHub Release named `1.2.3`, generates its
 release notes automatically, and attaches the `.AppImage`, `.exe` and `.dmg` files.
 
-The workflow can also be started manually from the Actions tab. A manual run
-stores the packages as workflow artifacts but does not create or modify a
-GitHub Release.
+If a tagged build fails, fix the problem on a branch and run the workflow from
+**Actions → Build native release packages → Run workflow**. Select the branch
+containing the fix and enter the existing tag (for example, `v1.2.7`) as
+`release_tag`. The workflow reruns tests and all three package builds, then
+creates the release or replaces its existing package assets. The version is
+taken from the tag; a new version tag is not needed. The tag itself is not
+moved: GitHub's source archive still points to its original commit, while the
+recovery packages are built from the selected branch. The release notes record
+the build commit.
 
 ## Project layout
 
