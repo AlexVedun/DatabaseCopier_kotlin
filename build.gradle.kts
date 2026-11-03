@@ -271,11 +271,16 @@ val prepareAppDir = tasks.register<Sync>("prepareAppDir") {
         }
     }
 
-    // Sync копирует права доступа как есть, но AppRun/desktop-файл в git всегда без exec-бита —
-    // appimagetool требует, чтобы AppRun был исполняемым, иначе получившийся .AppImage не запустится.
+    // appimagetool проверяет права запуска для всех пользователей. Одноаргументный
+    // setExecutable(true) выставляет exec-бит только владельцу (0744), поэтому
+    // явно добавляем чтение и выполнение для group/others (как минимум 0755).
     doLast {
-        appImageDir.get().file("AppRun").asFile.setExecutable(true)
-        appImageDir.get().file("database-copier.desktop").asFile.setExecutable(true)
+        for (name in listOf("AppRun", "database-copier.desktop")) {
+            val file = appImageDir.get().file(name).asFile
+            check(file.setReadable(true, false) && file.setExecutable(true, false)) {
+                "Не удалось выставить права чтения/выполнения для ${file.absolutePath}"
+            }
+        }
     }
 }
 
