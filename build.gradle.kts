@@ -62,11 +62,11 @@ dependencies {
     // Testing
     testImplementation(kotlin("test"))
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
-    testImplementation("org.testcontainers:testcontainers:1.21.3")
-    testImplementation("org.testcontainers:junit-jupiter:1.21.3")
-    testImplementation("org.testcontainers:mysql:1.21.3")
-    testImplementation("org.testcontainers:postgresql:1.21.3")
-    testImplementation("org.testcontainers:mssqlserver:1.21.3")
+    testImplementation("org.testcontainers:testcontainers:1.21.4")
+    testImplementation("org.testcontainers:junit-jupiter:1.21.4")
+    testImplementation("org.testcontainers:mysql:1.21.4")
+    testImplementation("org.testcontainers:postgresql:1.21.4")
+    testImplementation("org.testcontainers:mssqlserver:1.21.4")
 }
 
 tasks.test {
