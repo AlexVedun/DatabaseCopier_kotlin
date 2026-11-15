@@ -46,9 +46,9 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
 
     // Exposed for service database
-    implementation("org.jetbrains.exposed:exposed-core:0.41.1")
-    implementation("org.jetbrains.exposed:exposed-dao:0.41.1")
-    implementation("org.jetbrains.exposed:exposed-jdbc:0.41.1")
+    implementation("org.jetbrains.exposed:exposed-core:1.6.0")
+    implementation("org.jetbrains.exposed:exposed-dao:1.6.0")
+    implementation("org.jetbrains.exposed:exposed-jdbc:1.6.0")
 
     // Database drivers
     implementation("org.xerial:sqlite-jdbc:3.46.0.0")

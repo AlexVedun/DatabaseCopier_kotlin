@@ -4,13 +4,14 @@ import com.example.databasecopier.CopySessionRoutines
 import com.example.databasecopier.CopySessionTables
 import com.example.databasecopier.CopySessionViews
 import com.example.databasecopier.CopySessions
-import org.jetbrains.exposed.sql.ResultRow
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.inList
-import org.jetbrains.exposed.sql.insert
-import org.jetbrains.exposed.sql.select
-import org.jetbrains.exposed.sql.transactions.transaction
-import org.jetbrains.exposed.sql.update
+import org.jetbrains.exposed.v1.core.ResultRow
+import org.jetbrains.exposed.v1.core.SortOrder
+import org.jetbrains.exposed.v1.core.eq
+import org.jetbrains.exposed.v1.core.inList
+import org.jetbrains.exposed.v1.jdbc.insert
+import org.jetbrains.exposed.v1.jdbc.selectAll
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
+import org.jetbrains.exposed.v1.jdbc.update
 
 object CopySessionRepository {
 
@@ -63,7 +64,7 @@ object CopySessionRepository {
     }
 
     fun getViews(sessionId: Int): List<CopySessionViewRecord> = transaction {
-        CopySessionViews.select { CopySessionViews.copySessionId eq sessionId }.map { it.toViewRecord() }
+        CopySessionViews.selectAll().where { CopySessionViews.copySessionId eq sessionId }.map { it.toViewRecord() }
     }
 
     fun updateViewStatus(id: Int, status: String) = transaction {
@@ -83,7 +84,7 @@ object CopySessionRepository {
     }
 
     fun getRoutines(sessionId: Int): List<CopySessionRoutineRecord> = transaction {
-        CopySessionRoutines.select { CopySessionRoutines.copySessionId eq sessionId }.map { it.toRoutineRecord() }
+        CopySessionRoutines.selectAll().where { CopySessionRoutines.copySessionId eq sessionId }.map { it.toRoutineRecord() }
     }
 
     fun updateRoutineStatus(id: Int, status: String) = transaction {
@@ -93,19 +94,19 @@ object CopySessionRepository {
     }
 
     fun getSession(id: Int): CopySessionRecord? = transaction {
-        CopySessions.select { CopySessions.id eq id }.map { it.toSessionRecord() }.firstOrNull()
+        CopySessions.selectAll().where { CopySessions.id eq id }.map { it.toSessionRecord() }.firstOrNull()
     }
 
     fun getTables(sessionId: Int): List<CopySessionTableRecord> = transaction {
-        CopySessionTables.select { CopySessionTables.copySessionId eq sessionId }
+        CopySessionTables.selectAll().where { CopySessionTables.copySessionId eq sessionId }
             .map { it.toTableRecord() }
     }
 
     /** Сессии, которые имеет смысл показать на стартовом экране как "продолжаемые". */
     fun listResumable(): List<CopySessionRecord> = transaction {
-        CopySessions.select {
+        CopySessions.selectAll().where {
             CopySessions.status inList listOf("draft", "paused", "running", "failed")
-        }.orderBy(CopySessions.updatedAt, org.jetbrains.exposed.sql.SortOrder.DESC)
+        }.orderBy(CopySessions.updatedAt, SortOrder.DESC)
             .map { it.toSessionRecord() }
     }
 

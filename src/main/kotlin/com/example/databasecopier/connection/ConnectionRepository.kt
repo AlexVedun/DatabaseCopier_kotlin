@@ -5,18 +5,17 @@ import com.example.databasecopier.CopySessions
 import com.example.databasecopier.adapter.ConnectionConfig
 import com.example.databasecopier.adapter.DbType
 import com.example.databasecopier.security.CredentialCipher
-import org.jetbrains.exposed.sql.ResultRow
-import org.jetbrains.exposed.sql.SortOrder
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.neq
-import org.jetbrains.exposed.sql.and
-import org.jetbrains.exposed.sql.deleteWhere
-import org.jetbrains.exposed.sql.insert
-import org.jetbrains.exposed.sql.or
-import org.jetbrains.exposed.sql.select
-import org.jetbrains.exposed.sql.selectAll
-import org.jetbrains.exposed.sql.transactions.transaction
-import org.jetbrains.exposed.sql.update
+import org.jetbrains.exposed.v1.core.ResultRow
+import org.jetbrains.exposed.v1.core.SortOrder
+import org.jetbrains.exposed.v1.core.and
+import org.jetbrains.exposed.v1.core.eq
+import org.jetbrains.exposed.v1.core.neq
+import org.jetbrains.exposed.v1.core.or
+import org.jetbrains.exposed.v1.jdbc.deleteWhere
+import org.jetbrains.exposed.v1.jdbc.insert
+import org.jetbrains.exposed.v1.jdbc.selectAll
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
+import org.jetbrains.exposed.v1.jdbc.update
 
 data class ConnectionRecord(val id: Int, val name: String, val config: ConnectionConfig)
 
@@ -60,20 +59,20 @@ object ConnectionRepository {
         } else {
             Connections.name eq name
         }
-        !Connections.select { condition }.empty()
+        !Connections.selectAll().where { condition }.empty()
     }
 
     // Сколько сохранённых сессий (как источник или как приёмник) ссылаются на это подключение —
     // используется, чтобы предупредить перед удалением ("подключение используется в N сессиях"),
     // а не удалить его молча и оставить эти сессии невозобновляемыми (FK в SQLite не форсится).
     fun sessionsUsingCount(connectionId: Int): Int = transaction {
-        CopySessions.select {
+        CopySessions.selectAll().where {
             (CopySessions.sourceConnectionId eq connectionId) or (CopySessions.targetConnectionId eq connectionId)
         }.count().toInt()
     }
 
     fun load(id: Int): ConnectionConfig? = transaction {
-        Connections.select { Connections.id eq id }.map { it.toConfig() }.firstOrNull()
+        Connections.selectAll().where { Connections.id eq id }.map { it.toConfig() }.firstOrNull()
     }
 
     private fun ResultRow.toConfig() = ConnectionConfig(
