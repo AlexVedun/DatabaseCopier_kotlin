@@ -7,6 +7,8 @@ import com.example.databasecopier.ui.ConnectionsView
 import com.example.databasecopier.ui.CopyView
 import com.example.databasecopier.ui.LogViewerWindow
 import com.example.databasecopier.ui.SessionsView
+import com.example.databasecopier.ui.AppThemeMode
+import com.example.databasecopier.ui.ThemeManager
 import javafx.application.Application
 import javafx.scene.Scene
 import javafx.scene.control.Alert
@@ -35,6 +37,7 @@ class DatabaseCopierApp : Application() {
 
     override fun start(stage: Stage) {
         primaryStage = stage
+        ThemeManager.init()
         initAppDatabase()
         CopySessionRepository.pauseAllRunningSessions()
 
@@ -74,7 +77,22 @@ class DatabaseCopierApp : Application() {
             }
         }
         val languageMenu = buildLanguageMenu()
-        return MenuBar(Menu(Messages.get("menu.file"), null, connectionsMenuItem, logMenuItem, languageMenu))
+        val themeMenu = buildThemeMenu()
+        return MenuBar(Menu(Messages.get("menu.file"), null, connectionsMenuItem, logMenuItem, languageMenu, themeMenu))
+    }
+
+    private fun buildThemeMenu(): Menu {
+        val themeToggleGroup = ToggleGroup()
+        val items = AppThemeMode.entries.map { mode ->
+            RadioMenuItem(Messages.get(mode.messageKey)).apply {
+                toggleGroup = themeToggleGroup
+                isSelected = mode == ThemeManager.currentMode
+                setOnAction {
+                    ThemeManager.setMode(mode)
+                }
+            }
+        }
+        return Menu(Messages.get("menu.theme")).apply { this.items.addAll(items) }
     }
 
     // Смена языка не перестраивает уже показанный экран на лету (это потребовало бы либо полной

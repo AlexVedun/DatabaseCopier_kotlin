@@ -37,6 +37,7 @@ dependencies {
     implementation("org.openjfx:javafx-graphics:$javafxVersion:$javafxPlatform")
     implementation("org.openjfx:javafx-controls:$javafxVersion:$javafxPlatform")
     implementation("org.openjfx:javafx-fxml:$javafxVersion:$javafxPlatform")
+    implementation("io.github.mkpaz:atlantafx-base:3.0.0")
 
     // Kotlin coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")

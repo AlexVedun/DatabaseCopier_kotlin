@@ -41,7 +41,7 @@ class ProgressPanelController(
     private val overallProgressBar = ProgressBar(0.0).apply { prefWidth = 300.0; maxWidth = Double.MAX_VALUE }
     private val tableLabel = Label("")
     private val tableProgressBar = ProgressBar(0.0).apply { prefWidth = 300.0; maxWidth = Double.MAX_VALUE }
-    private val errorLabel = Label("").apply { isWrapText = true; style = "-fx-text-fill: red;" }
+    private val errorLabel = Label("").apply { isWrapText = true; style = "-fx-text-fill: -color-danger-fg;" }
 
     var sessionId: Int? = null
         private set

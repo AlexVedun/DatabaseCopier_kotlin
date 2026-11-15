@@ -59,7 +59,7 @@ class ConnectionEditDialog(
         text = initialConfig?.password ?: ""
         prefWidth = FIELD_WIDTH
     }
-    private val errorLabel = Label().apply { isWrapText = true; style = "-fx-text-fill: red;" }
+    private val errorLabel = Label().apply { isWrapText = true; style = "-fx-text-fill: -color-danger-fg;" }
 
     private val stage = Stage().apply {
         this.title = title
