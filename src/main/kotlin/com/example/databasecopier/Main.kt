@@ -60,7 +60,7 @@ class DatabaseCopierApp : Application() {
         stage.show()
 
         showInitialScreen(contentPane)
-        AppUpdater.notifyStartupSucceeded()
+        AppUpdater.notifyStartupSucceeded(parameters.raw)
         UpdateDialog.checkAndPromptOnStartup(stage)
     }
 

@@ -135,6 +135,16 @@ object UpdateDialog {
 
         val chosen = alert.showAndWait().orElse(laterButtonType)
         if (chosen == updateButtonType) {
+            try {
+                AppUpdater.ensureNoRunningCopies()
+            } catch (e: Exception) {
+                Alert(Alert.AlertType.WARNING, e.message ?: e.javaClass.simpleName).apply {
+                    initOwner(owner)
+                    title = Messages.get("update.title")
+                    headerText = null
+                }.showAndWait()
+                return
+            }
             startDownloadAndInstall(owner, asset)
         }
     }

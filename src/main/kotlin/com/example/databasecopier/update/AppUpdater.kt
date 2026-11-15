@@ -2,6 +2,8 @@ package com.example.databasecopier.update
 
 import com.example.databasecopier.AppInfo
 import com.example.databasecopier.getAppDataDir
+import com.example.databasecopier.i18n.Messages
+import com.example.databasecopier.session.CopySessionRepository
 import javafx.application.Platform
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -18,6 +20,7 @@ import java.net.HttpURLConnection
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 import kotlin.system.exitProcess
 
@@ -61,18 +64,33 @@ object AppUpdater {
     const val LATEST_RELEASE_API_URL = "https://api.github.com/repos/$GITHUB_REPO/releases/latest"
     const val DEFAULT_MAC_BUNDLE_NAME = "database-copier.app"
     private const val STARTUP_CONFIRM_TIMEOUT_MS = 15_000L
+    private const val UPDATE_TOKEN_ARG = "--database-copier-update-token="
 
-    internal var startupMarkerFile: File = getAppDataDir().resolve("update-startup-ok.marker")
+    internal var startupMarkerDir: File = getAppDataDir()
+
+    internal fun startupMarkerFile(token: UUID): File =
+        startupMarkerDir.resolve("update-startup-$token.marker")
 
     /**
      * Вызывается из `DatabaseCopierApp.start()` после успешной инициализации БД и показа главного окна.
      * Записывает маркер успешного старта, по которому процесс-обновщик убеждается, что новая версия
      * действительно запустилась и прошла инициализацию.
      */
-    fun notifyStartupSucceeded() {
+    fun notifyStartupSucceeded(arguments: List<String>) {
+        val token = arguments.firstNotNullOfOrNull { argument ->
+            argument.takeIf { it.startsWith(UPDATE_TOKEN_ARG) }
+                ?.removePrefix(UPDATE_TOKEN_ARG)
+                ?.let { runCatching { UUID.fromString(it) }.getOrNull() }
+        } ?: return
         runCatching {
-            startupMarkerFile.parentFile?.mkdirs()
-            startupMarkerFile.writeText(AppInfo.version)
+            startupMarkerDir.mkdirs()
+            startupMarkerFile(token).writeText(token.toString())
+        }.onFailure { logger.warn("Could not confirm startup for update {}", token, it) }
+    }
+
+    fun ensureNoRunningCopies(hasRunningSessions: () -> Boolean = CopySessionRepository::hasRunningSessions) {
+        if (hasRunningSessions()) {
+            throw IOException(Messages.get("update.copyInProgress"))
         }
     }
 
@@ -226,6 +244,7 @@ object AppUpdater {
         downloadedFile: File,
         platform: UpdatePlatform = UpdatePlatform.current(),
     ) {
+        ensureNoRunningCopies()
         when (platform) {
             UpdatePlatform.MACOS -> installMacDmgAndRestart(downloadedFile)
             UpdatePlatform.LINUX -> installLinuxAppImageAndRestart(downloadedFile)
@@ -268,8 +287,8 @@ object AppUpdater {
                 }
             }
 
-            // Переименовываем старый .app в .app.old и сохраняем его до успешного перезапуска новой
-            // версии, чтобы при любой ошибке копирования или запуска откатить рабочую версию обратно.
+            // Сохраняем предыдущий .app до подтверждения запуска. При таймауте macOS оставляем
+            // резервную копию на месте: новый процесс может всё ещё инициализироваться.
             if (hadExistingTarget) {
                 val moveToBackup = commandRunner(
                     listOf("mv", targetAppBundle.absolutePath, backupAppBundle.absolutePath)
@@ -314,8 +333,12 @@ object AppUpdater {
         try {
             relauncher(targetAppBundle)
         } catch (e: Throwable) {
-            if (backupCreated) {
+            // Launch Services does not return the new app's PID. After a timeout it may still be
+            // starting, so replacing its bundle underneath it is less safe than retaining .old.
+            if (backupCreated && e !is MacStartupUnconfirmedException) {
                 rollbackMacAppBundle(targetAppBundle, backupAppBundle, commandRunner, e)
+            } else if (e is MacStartupUnconfirmedException) {
+                logger.warn("macOS update startup is unconfirmed; backup retained at {}", backupAppBundle, e)
             }
             throw e
         }
@@ -370,10 +393,12 @@ object AppUpdater {
             listOf("hdiutil", "detach", mountPoint.absolutePath, "-quiet")
         }
 
-    internal fun buildMacRelaunchCommand(appBundle: File): List<String> = listOf(
+    internal fun buildMacRelaunchCommand(appBundle: File, token: UUID): List<String> = listOf(
         "open",
         "-n",
         appBundle.absolutePath,
+        "--args",
+        "$UPDATE_TOKEN_ARG$token",
     )
 
     internal fun findAppBundleInDirectory(mountPoint: File): File? =
@@ -409,18 +434,38 @@ object AppUpdater {
         return null
     }
 
-    private fun relaunchMacAppAndAwaitReady(
+    internal fun relaunchMacAppAndAwaitReady(
         targetAppBundle: File,
         commandRunner: (List<String>) -> CommandResult = ::runCommand,
         timeoutMs: Long = STARTUP_CONFIRM_TIMEOUT_MS,
     ) {
-        runCatching { Files.deleteIfExists(startupMarkerFile.toPath()) }
-        val launchResult = commandRunner(buildMacRelaunchCommand(targetAppBundle))
+        val token = UUID.randomUUID()
+        val launchResult = try {
+            commandRunner(buildMacRelaunchCommand(targetAppBundle, token))
+        } catch (e: Exception) {
+            // A failure while reading the open command's output does not prove that Launch
+            // Services failed to start the app. Retain the backup until the user can inspect it.
+            throw MacStartupUnconfirmedException(
+                "Не удалось определить, запущено ли обновлённое приложение. " +
+                    "Резервная копия сохранена в ${targetAppBundle.absolutePath}.old. ${e.message}",
+                e,
+            )
+        }
         if (launchResult.exitCode != 0) {
             throw IOException("Не удалось запустить обновлённое приложение ${targetAppBundle.absolutePath}: ${launchResult.output}")
         }
-        awaitStartupMarker(timeoutMs = timeoutMs, spawnedProcess = null)
+        try {
+            awaitStartupMarker(token = token, timeoutMs = timeoutMs, spawnedProcess = null)
+        } catch (e: Exception) {
+            throw MacStartupUnconfirmedException(
+                "Не удалось подтвердить запуск обновлённого приложения. Новый экземпляр может ещё работать; " +
+                    "резервная копия сохранена в ${targetAppBundle.absolutePath}.old. ${e.message}",
+                e,
+            )
+        }
     }
+
+    internal class MacStartupUnconfirmedException(message: String, cause: Throwable) : IOException(message, cause)
 
     internal fun installLinuxAppImageAndRestart(
         downloadedFile: File,
@@ -540,20 +585,25 @@ object AppUpdater {
         targetFile: File,
         timeoutMs: Long = STARTUP_CONFIRM_TIMEOUT_MS,
     ) {
-        runCatching { Files.deleteIfExists(startupMarkerFile.toPath()) }
-        val process = ProcessBuilder(targetFile.absolutePath).start()
-        awaitStartupMarker(timeoutMs = timeoutMs, spawnedProcess = process)
+        val token = UUID.randomUUID()
+        val process = ProcessBuilder(targetFile.absolutePath, "$UPDATE_TOKEN_ARG$token").start()
+        awaitStartupMarker(token = token, timeoutMs = timeoutMs, spawnedProcess = process)
     }
 
     internal fun awaitStartupMarker(
+        token: UUID,
         timeoutMs: Long,
         spawnedProcess: Process?,
     ) {
+        val markerFile = startupMarkerFile(token)
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
         while (System.nanoTime() < deadline) {
-            if (startupMarkerFile.isFile) {
-                runCatching { Files.deleteIfExists(startupMarkerFile.toPath()) }
-                return
+            if (markerFile.isFile) {
+                val recordedToken = runCatching { markerFile.readText().trim() }.getOrNull()
+                if (recordedToken == token.toString()) {
+                    runCatching { Files.deleteIfExists(markerFile.toPath()) }
+                    return
+                }
             }
             if (spawnedProcess != null && !spawnedProcess.isAlive) {
                 throw IOException(

@@ -12,6 +12,7 @@ import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
+import java.util.UUID
 
 class AppUpdaterTest {
 
@@ -22,6 +23,14 @@ class AppUpdaterTest {
         assertTrue(AppUpdater.compareVersions("2.0.0", "1.99.99") > 0)
         assertEquals(0, AppUpdater.compareVersions("v1.2.7", "1.2.7"))
         assertTrue(AppUpdater.compareVersions("1.2.6", "1.2.7") < 0)
+    }
+
+    @Test
+    fun `update refuses to replace application while a copy session is running`() {
+        assertThrows(IOException::class.java) {
+            AppUpdater.ensureNoRunningCopies { true }
+        }
+        AppUpdater.ensureNoRunningCopies { false }
     }
 
     @Test
@@ -355,25 +364,91 @@ class AppUpdaterTest {
     }
 
     @Test
-    fun `awaitStartupMarker succeeds when marker is created and throws when new process fails to initialize`() {
-        val originalMarker = AppUpdater.startupMarkerFile
+    fun `startup confirmation accepts only the token passed to the new instance`() {
+        val originalMarkerDir = AppUpdater.startupMarkerDir
         val tempDir = Files.createTempDirectory("startup-marker-test-").toFile()
         try {
-            val marker = File(tempDir, "update-startup-ok.marker")
-            AppUpdater.startupMarkerFile = marker
+            AppUpdater.startupMarkerDir = tempDir
+            val expectedToken = UUID.randomUUID()
+            val unrelatedToken = UUID.randomUUID()
+            val marker = AppUpdater.startupMarkerFile(expectedToken)
 
-            // 1. Таймаут без маркера выбрасывает IOException
+            assertEquals(
+                listOf("open", "-n", "/Applications/database-copier.app", "--args", "--database-copier-update-token=$expectedToken"),
+                AppUpdater.buildMacRelaunchCommand(File("/Applications/database-copier.app"), expectedToken),
+            )
+
+            AppUpdater.notifyStartupSucceeded(emptyList())
+            AppUpdater.notifyStartupSucceeded(listOf("--database-copier-update-token=$unrelatedToken"))
+            assertFalse(marker.exists())
+
+            marker.writeText(unrelatedToken.toString())
             assertThrows(IOException::class.java) {
-                AppUpdater.awaitStartupMarker(timeoutMs = 120L, spawnedProcess = null)
+                AppUpdater.awaitStartupMarker(expectedToken, timeoutMs = 120L, spawnedProcess = null)
             }
 
-            // 2. Запись маркера через notifyStartupSucceeded() подтверждает инициализацию
-            AppUpdater.notifyStartupSucceeded()
+            AppUpdater.notifyStartupSucceeded(listOf("--database-copier-update-token=$expectedToken"))
             assertTrue(marker.isFile)
-            AppUpdater.awaitStartupMarker(timeoutMs = 500L, spawnedProcess = null)
+            assertEquals(expectedToken.toString(), marker.readText())
+            AppUpdater.awaitStartupMarker(expectedToken, timeoutMs = 500L, spawnedProcess = null)
             assertFalse(marker.exists(), "Marker file should be cleaned up after confirmation")
+            assertTrue(AppUpdater.startupMarkerFile(unrelatedToken).exists())
         } finally {
-            AppUpdater.startupMarkerFile = originalMarker
+            AppUpdater.startupMarkerDir = originalMarkerDir
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `macOS keeps backup when launched app has not confirmed startup`() {
+        val tempDir = Files.createTempDirectory("mac-update-unconfirmed-test-").toFile()
+        try {
+            val dmgFile = File(tempDir, "update.dmg").apply { writeText("fake-dmg") }
+            val targetApp = File(tempDir, "Applications/database-copier.app").apply { mkdirs() }
+            val backupApp = File(tempDir, "Applications/database-copier.app.old")
+            val commands = mutableListOf<List<String>>()
+            var shutdownCalled = false
+
+            assertThrows(AppUpdater.MacStartupUnconfirmedException::class.java) {
+                AppUpdater.installMacDmgAndRestart(
+                    dmgFile = dmgFile,
+                    targetAppBundle = targetApp,
+                    commandRunner = { command ->
+                        commands.add(command)
+                        if (command.take(2) == listOf("hdiutil", "attach")) {
+                            File(command[command.indexOf("-mountpoint") + 1], "database-copier.app").mkdirs()
+                        }
+                        AppUpdater.CommandResult(0, "")
+                    },
+                    relauncher = { throw AppUpdater.MacStartupUnconfirmedException("timeout", IOException("timeout")) },
+                    onShutdown = { shutdownCalled = true },
+                )
+            }
+
+            assertTrue(commands.contains(listOf("mv", targetApp.absolutePath, backupApp.absolutePath)))
+            assertFalse(commands.contains(listOf("mv", backupApp.absolutePath, targetApp.absolutePath)))
+            assertFalse(commands.contains(listOf("rm", "-rf", backupApp.absolutePath)))
+            assertFalse(shutdownCalled)
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `macOS launch timeout is reported as unconfirmed instead of safe to roll back`() {
+        val originalMarkerDir = AppUpdater.startupMarkerDir
+        val tempDir = Files.createTempDirectory("mac-startup-timeout-test-").toFile()
+        try {
+            AppUpdater.startupMarkerDir = tempDir
+            assertThrows(AppUpdater.MacStartupUnconfirmedException::class.java) {
+                AppUpdater.relaunchMacAppAndAwaitReady(
+                    targetAppBundle = File("/Applications/database-copier.app"),
+                    commandRunner = { AppUpdater.CommandResult(0, "") },
+                    timeoutMs = 100L,
+                )
+            }
+        } finally {
+            AppUpdater.startupMarkerDir = originalMarkerDir
             tempDir.deleteRecursively()
         }
     }

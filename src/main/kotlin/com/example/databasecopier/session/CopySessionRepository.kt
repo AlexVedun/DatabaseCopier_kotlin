@@ -15,6 +15,10 @@ import org.jetbrains.exposed.v1.jdbc.update
 
 object CopySessionRepository {
 
+    fun hasRunningSessions(): Boolean = transaction {
+        !CopySessions.selectAll().where { CopySessions.status eq "running" }.empty()
+    }
+
     fun createSession(
         name: String,
         sourceType: String,

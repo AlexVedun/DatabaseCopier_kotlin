@@ -15,6 +15,8 @@ import org.jetbrains.exposed.v1.jdbc.Database
 import org.jetbrains.exposed.v1.jdbc.SchemaUtils
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import java.io.File
@@ -54,6 +56,25 @@ class SqliteCopyRunnerTest {
                 }
             }
         }
+    }
+
+    @Test
+    fun `reports whether a copy session is currently running`() {
+        assertFalse(CopySessionRepository.hasRunningSessions())
+        val sessionId = CopySessionRepository.createSession(
+            name = "update guard",
+            sourceType = "connection",
+            sourceConnectionId = null,
+            sourceDumpPath = null,
+            sourceDumpDialect = null,
+            targetConnectionId = 1,
+            copyMode = "structure_and_data",
+        )
+        assertFalse(CopySessionRepository.hasRunningSessions())
+        CopySessionRepository.updateSessionStatus(sessionId, "running")
+        assertTrue(CopySessionRepository.hasRunningSessions())
+        CopySessionRepository.updateSessionStatus(sessionId, "paused")
+        assertFalse(CopySessionRepository.hasRunningSessions())
     }
 
     @Test
