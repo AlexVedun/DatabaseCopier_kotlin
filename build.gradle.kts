@@ -49,7 +49,7 @@ dependencies {
     // Exposed for service database
     implementation("org.jetbrains.exposed:exposed-core:1.6.0")
     implementation("org.jetbrains.exposed:exposed-dao:1.6.0")
-    implementation("org.jetbrains.exposed:exposed-jdbc:1.6.0")
+    implementation("org.jetbrains.exposed:exposed-jdbc:1.6.1")
 
     // Database drivers
     implementation("org.xerial:sqlite-jdbc:3.46.0.0")
