@@ -194,7 +194,11 @@ val jpackageAppImage = tasks.register<Exec>("jpackageAppImage") {
         outputDir.get().asFile.mkdirs()
     }
 
-    commandLine(*jpackageCommonArgs("app-image", outputDir.get().asFile).toTypedArray())
+    commandLine(
+        *(jpackageCommonArgs("app-image", outputDir.get().asFile) + listOf(
+            "--icon", file("packaging/appimage/database-copier.png").absolutePath,
+        )).toTypedArray()
+    )
 }
 
 val windowsExe = tasks.register<Exec>("windowsExe") {
@@ -212,6 +216,7 @@ val windowsExe = tasks.register<Exec>("windowsExe") {
 
     commandLine(
         *(jpackageCommonArgs("exe", outputDir.get().asFile) + listOf(
+            "--icon", file("packaging/windows/database-copier.ico").absolutePath,
             "--win-dir-chooser",
             "--win-menu",
             "--win-menu-group", packageVendor,
@@ -235,6 +240,7 @@ val macDmg = tasks.register<Exec>("macDmg") {
 
     commandLine(
         *(jpackageCommonArgs("dmg", outputDir.get().asFile) + listOf(
+            "--icon", file("packaging/macos/database-copier.icns").absolutePath,
             "--mac-package-identifier", "com.example.databasecopier",
         )).toTypedArray()
     )

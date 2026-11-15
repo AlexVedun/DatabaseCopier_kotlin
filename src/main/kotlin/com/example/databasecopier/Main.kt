@@ -18,9 +18,12 @@ import javafx.scene.control.MenuBar
 import javafx.scene.control.MenuItem
 import javafx.scene.control.RadioMenuItem
 import javafx.scene.control.ToggleGroup
+import javafx.scene.image.Image
 import javafx.scene.layout.BorderPane
 import javafx.stage.Stage
+import java.awt.Taskbar
 import java.util.Locale
+import javax.imageio.ImageIO
 
 class DatabaseCopierApp : Application() {
 
@@ -51,6 +54,7 @@ class DatabaseCopierApp : Application() {
         // высоту, которая раньше (до добавления строки меню) была у него целиком.
         val scene = Scene(root, 900.0, 710.0)
         stage.title = AppInfo.windowTitle
+        applyAppIcons(stage)
         stage.scene = scene
         stage.show()
 
@@ -148,6 +152,22 @@ class DatabaseCopierApp : Application() {
                 },
                 onSkip = { currentCopyView = CopyView().also { contentPane.center = it.root } },
             ).root
+        }
+    }
+
+    private fun applyAppIcons(stage: Stage) {
+        DatabaseCopierApp::class.java.getResourceAsStream("/database-copier.png")?.use { stream ->
+            stage.icons.add(Image(stream))
+        }
+        runCatching {
+            if (Taskbar.isTaskbarSupported()) {
+                val taskbar = Taskbar.getTaskbar()
+                if (taskbar.isSupported(Taskbar.Feature.ICON_IMAGE)) {
+                    DatabaseCopierApp::class.java.getResource("/database-copier.png")?.let { url ->
+                        taskbar.iconImage = ImageIO.read(url)
+                    }
+                }
+            }
         }
     }
 }
