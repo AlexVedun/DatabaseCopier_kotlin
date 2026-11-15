@@ -2,11 +2,16 @@ package com.example.databasecopier.ui
 
 import atlantafx.base.theme.PrimerDark
 import atlantafx.base.theme.PrimerLight
+import com.example.databasecopier.AppScope
 import com.example.databasecopier.getAppDataDir
 import javafx.application.Application
 import javafx.application.ColorScheme
 import javafx.application.Platform
 import javafx.beans.value.ChangeListener
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import java.io.File
+import java.util.concurrent.TimeUnit
 
 enum class AppThemeMode(val messageKey: String) {
     SYSTEM("theme.system"),
@@ -29,10 +34,10 @@ enum class AppThemeMode(val messageKey: String) {
  */
 object ThemeManager {
 
-    private val themeFile = getAppDataDir().resolve("theme.txt")
+    internal var themeFile: File = getAppDataDir().resolve("theme.txt")
 
     var currentMode: AppThemeMode = loadSaved()
-        private set
+        internal set
 
     private var initialized = false
     private var appliedDark: Boolean? = null
@@ -57,7 +62,7 @@ object ThemeManager {
     fun setMode(mode: AppThemeMode) {
         currentMode = mode
         runCatching {
-            themeFile.parentFile.mkdirs()
+            themeFile.parentFile?.mkdirs()
             themeFile.writeText(mode.name)
         }
         applyEffectiveTheme()
@@ -70,7 +75,29 @@ object ThemeManager {
     }
 
     internal fun applyEffectiveTheme() {
-        val dark = isDarkEffective()
+        when (currentMode) {
+            AppThemeMode.LIGHT -> applyStylesheet(dark = false)
+            AppThemeMode.DARK -> applyStylesheet(dark = true)
+            AppThemeMode.SYSTEM -> {
+                // Мгновенно выставляем начальную тему по встроенному свойству JavaFX без блокировки
+                // UI-потока внешними процессами, а опрос gsettings/gdbus выполняем в фоне.
+                val fxScheme = runCatching { Platform.getPreferences().colorScheme }.getOrNull()
+                if (appliedDark == null) {
+                    applyStylesheet(dark = fxScheme == ColorScheme.DARK)
+                }
+                AppScope.scope.launch(Dispatchers.IO) {
+                    val dark = detectSystemDark(fxColorScheme = fxScheme)
+                    Platform.runLater {
+                        if (currentMode == AppThemeMode.SYSTEM) {
+                            applyStylesheet(dark = dark)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun applyStylesheet(dark: Boolean) {
         if (appliedDark == dark) return
         appliedDark = dark
         val theme = if (dark) PrimerDark() else PrimerLight()
@@ -130,12 +157,31 @@ object ThemeManager {
         "org.freedesktop.appearance", "color-scheme",
     )
 
-    private fun runCommandCapture(vararg command: String): String? = runCatching {
+    internal fun runCommandCapture(
+        vararg command: String,
+        timeoutMs: Long = 500L,
+    ): String? = runCatching {
         val process = ProcessBuilder(*command)
-            .redirectErrorStream(false)
+            .redirectError(ProcessBuilder.Redirect.DISCARD)
             .start()
-        val output = process.inputStream.bufferedReader().use { it.readText().trim() }
-        if (process.waitFor() == 0 && output.isNotEmpty()) output else null
+        process.outputStream.close()
+
+        var output = ""
+        val readerThread = Thread({
+            output = runCatching {
+                process.inputStream.bufferedReader().use { it.readText().trim() }
+            }.getOrDefault("")
+        }, "theme-cmd-reader").apply {
+            isDaemon = true
+            start()
+        }
+
+        if (!process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)) {
+            process.destroyForcibly()
+            return@runCatching null
+        }
+        readerThread.join(timeoutMs)
+        if (process.exitValue() == 0 && output.isNotEmpty()) output else null
     }.getOrNull()
 
     private fun startLinuxSystemThemeMonitors() {
@@ -162,7 +208,8 @@ object ThemeManager {
                 val process = ProcessBuilder(*command)
                     .redirectError(ProcessBuilder.Redirect.DISCARD)
                     .start()
-                Runtime.getRuntime().addShutdownHook(Thread { runCatching { process.destroy() } })
+                process.outputStream.close()
+                Runtime.getRuntime().addShutdownHook(Thread { runCatching { process.destroyForcibly() } })
                 process.inputStream.bufferedReader().useLines { lines ->
                     for (line in lines) {
                         if (lineFilter(line) && currentMode == AppThemeMode.SYSTEM) {

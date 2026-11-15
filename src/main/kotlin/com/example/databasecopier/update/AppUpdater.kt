@@ -214,7 +214,12 @@ object AppUpdater {
             val hadExistingTarget = targetAppBundle.exists()
 
             if (backupAppBundle.exists()) {
-                commandRunner(listOf("rm", "-rf", backupAppBundle.absolutePath))
+                val cleanOldBackup = commandRunner(listOf("rm", "-rf", backupAppBundle.absolutePath))
+                if (cleanOldBackup.exitCode != 0) {
+                    throw IOException(
+                        "Не удалось удалить старую резервную копию ${backupAppBundle.absolutePath}: ${cleanOldBackup.output}"
+                    )
+                }
             }
 
             // Переименовываем старый .app в .app.old и сохраняем его до успешного завершения копирования,
@@ -237,10 +242,24 @@ object AppUpdater {
             )
             if (copyResult.exitCode != 0) {
                 if (hadExistingTarget) {
-                    commandRunner(listOf("rm", "-rf", targetAppBundle.absolutePath))
-                    commandRunner(listOf("mv", backupAppBundle.absolutePath, targetAppBundle.absolutePath))
+                    val rmPartial = commandRunner(listOf("rm", "-rf", targetAppBundle.absolutePath))
+                    val restoreBackup = if (rmPartial.exitCode == 0) {
+                        commandRunner(listOf("mv", backupAppBundle.absolutePath, targetAppBundle.absolutePath))
+                    } else {
+                        null
+                    }
+                    if (rmPartial.exitCode != 0 || restoreBackup == null || restoreBackup.exitCode != 0) {
+                        val rollbackDetails = restoreBackup?.output?.ifBlank { "код ${restoreBackup.exitCode}" }
+                            ?: rmPartial.output.ifBlank { "код ${rmPartial.exitCode}" }
+                        throw IOException(
+                            "Не удалось скопировать ${mountedApp.name} в ${targetAppBundle.absolutePath} (${copyResult.output}), " +
+                                "и не удалось автоматически восстановить резервную копию из ${backupAppBundle.absolutePath}: $rollbackDetails"
+                        )
+                    }
                 }
-                throw IOException("Не удалось скопировать ${mountedApp.name} в ${targetAppBundle.absolutePath}: ${copyResult.output}")
+                throw IOException(
+                    "Не удалось скопировать ${mountedApp.name} в ${targetAppBundle.absolutePath} (предыдущая версия восстановлена): ${copyResult.output}"
+                )
             }
 
             // Замена прошла успешно — удаляем резервную копию старого бандла.
@@ -375,13 +394,20 @@ object AppUpdater {
         relauncher(targetFile)
     }
 
-    private fun resolveLinuxAppImageFile(): File {
-        val currentAppImagePath = System.getenv("APPIMAGE")?.takeIf { it.isNotBlank() }
-            ?: System.getProperty("jpackage.app-path")?.takeIf { it.isNotBlank() }
+    internal fun resolveLinuxAppImageFile(
+        appImageEnv: String? = System.getenv("APPIMAGE"),
+    ): File {
+        val currentAppImagePath = appImageEnv?.takeIf { it.isNotBlank() }
             ?: throw IOException(
-                "Переменная окружения APPIMAGE не задана — автозамена на Linux поддерживается при запуске из .AppImage"
+                "Переменная окружения APPIMAGE не задана — автозамена на Linux поддерживается только при запуске из .AppImage"
             )
-        return File(currentAppImagePath)
+        val file = File(currentAppImagePath)
+        if (!file.isFile || !file.name.endsWith(".AppImage", ignoreCase = true)) {
+            throw IOException(
+                "Некорректный путь APPIMAGE (${file.absolutePath}): ожидался существующий файл .AppImage"
+            )
+        }
+        return file
     }
 
     private fun relaunchLinuxAppImage(targetFile: File) {

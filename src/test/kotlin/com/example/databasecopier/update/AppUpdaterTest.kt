@@ -203,4 +203,63 @@ class AppUpdaterTest {
             tempDir.deleteRecursively()
         }
     }
+
+    @Test
+    fun `macOS DMG update reports explicit error if rollback of backup also fails`() {
+        val tempDir = Files.createTempDirectory("mac-update-rollback-fail-test-").toFile()
+        try {
+            val dmgFile = File(tempDir, "database-copier-1.3.0.dmg").apply { writeText("fake-dmg") }
+            val targetApp = File(tempDir, "Applications/database-copier.app").apply { mkdirs() }
+            val backupApp = File(tempDir, "Applications/database-copier.app.old")
+
+            val ex = assertThrows(IOException::class.java) {
+                AppUpdater.installMacDmgAndRestart(
+                    dmgFile = dmgFile,
+                    targetAppBundle = targetApp,
+                    commandRunner = { cmd ->
+                        when {
+                            cmd.take(2) == listOf("hdiutil", "attach") -> {
+                                val mountPointPath = cmd[cmd.indexOf("-mountpoint") + 1]
+                                File(mountPointPath, "database-copier.app").mkdirs()
+                                AppUpdater.CommandResult(exitCode = 0, output = "")
+                            }
+                            cmd.firstOrNull() == "ditto" -> {
+                                AppUpdater.CommandResult(exitCode = 1, output = "Disk I/O error")
+                            }
+                            cmd == listOf("mv", backupApp.absolutePath, targetApp.absolutePath) -> {
+                                AppUpdater.CommandResult(exitCode = 1, output = "Permission denied")
+                            }
+                            else -> AppUpdater.CommandResult(exitCode = 0, output = "")
+                        }
+                    },
+                    relauncher = {},
+                )
+            }
+
+            assertTrue(ex.message!!.contains(backupApp.absolutePath))
+            assertTrue(ex.message!!.contains("Permission denied"))
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `resolveLinuxAppImageFile rejects missing APPIMAGE or non-AppImage path`() {
+        assertThrows(IOException::class.java) {
+            AppUpdater.resolveLinuxAppImageFile(appImageEnv = null)
+        }
+
+        val tempDir = Files.createTempDirectory("linux-appimage-resolve-test-").toFile()
+        try {
+            val jpackageBinary = File(tempDir, "database-copier").apply { writeText("launcher") }
+            assertThrows(IOException::class.java) {
+                AppUpdater.resolveLinuxAppImageFile(appImageEnv = jpackageBinary.absolutePath)
+            }
+
+            val validAppImage = File(tempDir, "database-copier-1.2.7-x86_64.AppImage").apply { writeText("appimage") }
+            assertEquals(validAppImage, AppUpdater.resolveLinuxAppImageFile(appImageEnv = validAppImage.absolutePath))
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
 }

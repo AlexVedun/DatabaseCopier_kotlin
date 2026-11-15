@@ -5,15 +5,38 @@ import atlantafx.base.theme.PrimerLight
 import javafx.application.Application
 import javafx.application.ColorScheme
 import javafx.application.Platform
+import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assumptions.assumeTrue
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import java.io.File
+import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 
 class ThemeManagerTest {
+
+    private lateinit var originalThemeFile: File
+    private lateinit var originalMode: AppThemeMode
+    private lateinit var tempThemeFile: File
+
+    @BeforeEach
+    fun setUp() {
+        originalThemeFile = ThemeManager.themeFile
+        originalMode = ThemeManager.currentMode
+        tempThemeFile = Files.createTempFile("theme-manager-test-", ".txt").toFile()
+        ThemeManager.themeFile = tempThemeFile
+    }
+
+    @AfterEach
+    fun tearDown() {
+        ThemeManager.themeFile = originalThemeFile
+        ThemeManager.currentMode = originalMode
+        runCatching { tempThemeFile.delete() }
+    }
 
     private fun ensureJavaFxToolkit(): Boolean {
         val latch = CountDownLatch(1)
@@ -70,18 +93,24 @@ class ThemeManagerTest {
     }
 
     @Test
-    fun `switches userAgentStylesheet between PrimerLight and PrimerDark`() {
+    fun `runCommandCapture times out and terminates hung command without blocking`() {
+        val result = ThemeManager.runCommandCapture("sh", "-c", "sleep 5", timeoutMs = 100L)
+        assertNull(result)
+    }
+
+    @Test
+    fun `switches userAgentStylesheet between PrimerLight and PrimerDark using isolated theme file`() {
         assumeTrue(ensureJavaFxToolkit(), "JavaFX DISPLAY is not available in this environment")
         val latch = CountDownLatch(1)
         Platform.runLater {
             try {
                 ThemeManager.setMode(AppThemeMode.DARK)
                 assertEquals(PrimerDark().userAgentStylesheet, Application.getUserAgentStylesheet())
+                assertEquals("DARK", tempThemeFile.readText())
 
                 ThemeManager.setMode(AppThemeMode.LIGHT)
                 assertEquals(PrimerLight().userAgentStylesheet, Application.getUserAgentStylesheet())
-
-                ThemeManager.setMode(AppThemeMode.SYSTEM)
+                assertEquals("LIGHT", tempThemeFile.readText())
             } finally {
                 latch.countDown()
             }
