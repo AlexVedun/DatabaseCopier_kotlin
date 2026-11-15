@@ -1,5 +1,6 @@
 package com.example.databasecopier.update
 
+import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
@@ -7,6 +8,7 @@ import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
@@ -82,7 +84,7 @@ class AppUpdaterTest {
     }
 
     @Test
-    fun `macOS DMG update keeps backup until relaunch succeeds, then removes backup`() {
+    fun `macOS DMG update keeps backup until relaunch succeeds, then removes backup before shutdown`() {
         val tempDir = Files.createTempDirectory("mac-update-test-").toFile()
         try {
             val dmgFile = File(tempDir, "database-copier-1.3.0.dmg").apply { writeText("fake-dmg") }
@@ -107,17 +109,23 @@ class AppUpdaterTest {
                     events.add("relaunch ${app.absolutePath}")
                     relaunchedBundle = app
                 },
+                onShutdown = {
+                    assertFalse(dmgFile.exists(), "DMG must be deleted BEFORE shutdown is triggered")
+                    events.add("shutdown")
+                },
             )
 
             val moveToBackupIdx = events.indexOf("mv ${targetApp.absolutePath} ${backupApp.absolutePath}")
             val dittoIdx = events.indexOfFirst { it.startsWith("ditto ") && it.endsWith(targetApp.absolutePath) }
             val relaunchIdx = events.indexOf("relaunch ${targetApp.absolutePath}")
             val removeBackupIdx = events.indexOf("rm -rf ${backupApp.absolutePath}")
+            val shutdownIdx = events.indexOf("shutdown")
 
             assertTrue(moveToBackupIdx >= 0)
             assertTrue(dittoIdx > moveToBackupIdx)
             assertTrue(relaunchIdx > dittoIdx, "Relaunch must happen after ditto")
             assertTrue(removeBackupIdx > relaunchIdx, "Backup .app.old must be removed only AFTER relaunch succeeds")
+            assertTrue(shutdownIdx > removeBackupIdx, "Shutdown must happen only AFTER backup cleanup completes")
 
             assertEquals(targetApp, relaunchedBundle)
             assertFalse(dmgFile.exists(), "Temporary DMG file should be deleted after update")
@@ -231,6 +239,7 @@ class AppUpdaterTest {
             val backupAppImage = File(tempDir, "database-copier.AppImage.old")
 
             // Сначала проверяем откат при сбое перезапуска
+            var shutdownCalled = false
             assertThrows(IOException::class.java) {
                 AppUpdater.installLinuxAppImageAndRestart(
                     downloadedFile = downloadedAppImage,
@@ -239,8 +248,10 @@ class AppUpdaterTest {
                         assertTrue(backupAppImage.exists(), "Backup .old must still exist during relaunch")
                         throw IOException("Failed to start new AppImage")
                     },
+                    onShutdown = { shutdownCalled = true },
                 )
             }
+            assertFalse(shutdownCalled, "Old process must not shut down when relaunch fails")
             assertEquals("old-binary", targetAppImage.readText(), "Old binary must be restored on relaunch failure")
             assertFalse(backupAppImage.exists())
 
@@ -253,8 +264,14 @@ class AppUpdaterTest {
                     assertTrue(backupAppImage.exists(), "Backup .old must still exist until relaunch completes")
                     relaunchedFile = it
                 },
+                onShutdown = {
+                    assertFalse(backupAppImage.exists(), "Backup .old must be removed BEFORE shutdown is triggered")
+                    assertFalse(downloadedAppImage.exists(), "Downloaded file must be removed BEFORE shutdown is triggered")
+                    shutdownCalled = true
+                },
             )
 
+            assertTrue(shutdownCalled)
             assertEquals("new-binary", targetAppImage.readText())
             assertTrue(targetAppImage.canExecute())
             assertFalse(backupAppImage.exists(), "Backup .old file should be removed after successful relaunch")
@@ -301,6 +318,62 @@ class AppUpdaterTest {
                 )
             }
         } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `downloadStreamToFile rejects truncated stream and deletes incomplete file`() = runBlocking {
+        val tempDir = Files.createTempDirectory("download-verify-test-").toFile()
+        try {
+            val destFile = File(tempDir, "package.dmg")
+            val partialBytes = ByteArray(100) { 1 }
+
+            assertThrows(IOException::class.java) {
+                runBlocking {
+                    AppUpdater.downloadStreamToFile(
+                        input = ByteArrayInputStream(partialBytes),
+                        destination = destFile,
+                        expectedBytes = 250L,
+                        onProgress = { _, _ -> },
+                    )
+                }
+            }
+            assertFalse(destFile.exists(), "Truncated download file must be deleted on size mismatch")
+
+            AppUpdater.downloadStreamToFile(
+                input = ByteArrayInputStream(partialBytes),
+                destination = destFile,
+                expectedBytes = 100L,
+                onProgress = { _, _ -> },
+            )
+            assertTrue(destFile.exists())
+            assertEquals(100L, destFile.length())
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `awaitStartupMarker succeeds when marker is created and throws when new process fails to initialize`() {
+        val originalMarker = AppUpdater.startupMarkerFile
+        val tempDir = Files.createTempDirectory("startup-marker-test-").toFile()
+        try {
+            val marker = File(tempDir, "update-startup-ok.marker")
+            AppUpdater.startupMarkerFile = marker
+
+            // 1. Таймаут без маркера выбрасывает IOException
+            assertThrows(IOException::class.java) {
+                AppUpdater.awaitStartupMarker(timeoutMs = 120L, spawnedProcess = null)
+            }
+
+            // 2. Запись маркера через notifyStartupSucceeded() подтверждает инициализацию
+            AppUpdater.notifyStartupSucceeded()
+            assertTrue(marker.isFile)
+            AppUpdater.awaitStartupMarker(timeoutMs = 500L, spawnedProcess = null)
+            assertFalse(marker.exists(), "Marker file should be cleaned up after confirmation")
+        } finally {
+            AppUpdater.startupMarkerFile = originalMarker
             tempDir.deleteRecursively()
         }
     }

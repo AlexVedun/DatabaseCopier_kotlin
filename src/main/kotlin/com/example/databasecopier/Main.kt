@@ -10,6 +10,7 @@ import com.example.databasecopier.ui.SessionsView
 import com.example.databasecopier.ui.AppThemeMode
 import com.example.databasecopier.ui.ThemeManager
 import com.example.databasecopier.ui.UpdateDialog
+import com.example.databasecopier.update.AppUpdater
 import javafx.application.Application
 import javafx.scene.Scene
 import javafx.scene.control.Alert
@@ -59,6 +60,7 @@ class DatabaseCopierApp : Application() {
         stage.show()
 
         showInitialScreen(contentPane)
+        AppUpdater.notifyStartupSucceeded()
         UpdateDialog.checkAndPromptOnStartup(stage)
     }
 

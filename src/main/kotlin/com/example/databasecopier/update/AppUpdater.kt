@@ -1,6 +1,7 @@
 package com.example.databasecopier.update
 
 import com.example.databasecopier.AppInfo
+import com.example.databasecopier.getAppDataDir
 import javafx.application.Platform
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -12,10 +13,12 @@ import kotlinx.serialization.json.longOrNull
 import org.slf4j.LoggerFactory
 import java.io.File
 import java.io.IOException
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.util.concurrent.TimeUnit
 import kotlin.system.exitProcess
 
 enum class UpdatePlatform {
@@ -57,6 +60,21 @@ object AppUpdater {
     const val GITHUB_REPO = "AlexVedun/DatabaseCopier_kotlin"
     const val LATEST_RELEASE_API_URL = "https://api.github.com/repos/$GITHUB_REPO/releases/latest"
     const val DEFAULT_MAC_BUNDLE_NAME = "database-copier.app"
+    private const val STARTUP_CONFIRM_TIMEOUT_MS = 15_000L
+
+    internal var startupMarkerFile: File = getAppDataDir().resolve("update-startup-ok.marker")
+
+    /**
+     * Вызывается из `DatabaseCopierApp.start()` после успешной инициализации БД и показа главного окна.
+     * Записывает маркер успешного старта, по которому процесс-обновщик убеждается, что новая версия
+     * действительно запустилась и прошла инициализацию.
+     */
+    fun notifyStartupSucceeded() {
+        runCatching {
+            startupMarkerFile.parentFile?.mkdirs()
+            startupMarkerFile.writeText(AppInfo.version)
+        }
+    }
 
     /**
      * Проверяет последний релиз на GitHub. Возвращает [ReleaseInfo], если на GitHub опубликована
@@ -146,26 +164,51 @@ object AppUpdater {
             if (code !in 200..299) {
                 throw IOException("HTTP $code при скачивании ${asset.downloadUrl}")
             }
-            val totalBytes = conn.contentLengthLong.takeIf { it > 0 } ?: asset.size
-            destination.parentFile?.mkdirs()
+            val contentLength = conn.contentLengthLong
+            if (contentLength > 0 && asset.size > 0 && contentLength != asset.size) {
+                throw IOException(
+                    "Несовпадение размера пакета ${asset.name}: HTTP Content-Length=$contentLength, в релизе=${asset.size}"
+                )
+            }
+            val expectedBytes = contentLength.takeIf { it > 0 } ?: asset.size
 
             conn.inputStream.buffered().use { input ->
-                destination.outputStream().buffered().use { output ->
-                    val buffer = ByteArray(64 * 1024)
-                    var downloaded = 0L
-                    while (true) {
-                        currentCoroutineContext().ensureActive()
-                        val read = input.read(buffer)
-                        if (read < 0) break
-                        output.write(buffer, 0, read)
-                        downloaded += read
-                        onProgress(downloaded, totalBytes)
-                    }
-                    output.flush()
-                }
+                downloadStreamToFile(input, destination, expectedBytes, onProgress)
             }
         } finally {
             conn.disconnect()
+        }
+    }
+
+    internal suspend fun downloadStreamToFile(
+        input: InputStream,
+        destination: File,
+        expectedBytes: Long,
+        onProgress: (downloadedBytes: Long, totalBytes: Long) -> Unit,
+    ) {
+        destination.parentFile?.mkdirs()
+        try {
+            destination.outputStream().buffered().use { output ->
+                val buffer = ByteArray(64 * 1024)
+                var downloaded = 0L
+                while (true) {
+                    currentCoroutineContext().ensureActive()
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    output.write(buffer, 0, read)
+                    downloaded += read
+                    onProgress(downloaded, expectedBytes)
+                }
+                output.flush()
+                if (expectedBytes > 0 && downloaded != expectedBytes) {
+                    throw IOException(
+                        "Скачивание прервано преждевременно: получено $downloaded из $expectedBytes байт"
+                    )
+                }
+            }
+        } catch (e: Throwable) {
+            runCatching { destination.delete() }
+            throw e
         }
     }
 
@@ -195,7 +238,8 @@ object AppUpdater {
         dmgFile: File,
         targetAppBundle: File = resolveMacAppBundlePath(),
         commandRunner: (List<String>) -> CommandResult = ::runCommand,
-        relauncher: (File) -> Unit = { app -> relaunchMacApp(app, commandRunner) },
+        relauncher: (File) -> Unit = { app -> relaunchMacAppAndAwaitReady(app, commandRunner) },
+        onShutdown: () -> Unit = ::shutdownApplication,
     ) {
         val mountPoint = Files.createTempDirectory("database-copier-dmg-").toFile()
         val backupAppBundle = File(targetAppBundle.parentFile, "${targetAppBundle.name}.old")
@@ -276,11 +320,13 @@ object AppUpdater {
             throw e
         }
 
-        // Только после успешного запуска новой версии удаляем резервную копию .app.old и временный DMG.
+        // Только после подтверждённого запуска новой версии синхронно удаляем резервную копию .app.old
+        // и временный DMG, и лишь затем завершаем старый процесс.
         if (backupCreated) {
             runCatching { commandRunner(listOf("rm", "-rf", backupAppBundle.absolutePath)) }
         }
         runCatching { dmgFile.delete() }
+        onShutdown()
     }
 
     private fun rollbackMacAppBundle(
@@ -363,21 +409,24 @@ object AppUpdater {
         return null
     }
 
-    private fun relaunchMacApp(
+    private fun relaunchMacAppAndAwaitReady(
         targetAppBundle: File,
         commandRunner: (List<String>) -> CommandResult = ::runCommand,
+        timeoutMs: Long = STARTUP_CONFIRM_TIMEOUT_MS,
     ) {
+        runCatching { Files.deleteIfExists(startupMarkerFile.toPath()) }
         val launchResult = commandRunner(buildMacRelaunchCommand(targetAppBundle))
         if (launchResult.exitCode != 0) {
             throw IOException("Не удалось запустить обновлённое приложение ${targetAppBundle.absolutePath}: ${launchResult.output}")
         }
-        shutdownApplication()
+        awaitStartupMarker(timeoutMs = timeoutMs, spawnedProcess = null)
     }
 
     internal fun installLinuxAppImageAndRestart(
         downloadedFile: File,
         targetFile: File = resolveLinuxAppImageFile(),
-        relauncher: (File) -> Unit = ::relaunchLinuxAppImage,
+        relauncher: (File) -> Unit = ::relaunchLinuxAppImageAndAwaitReady,
+        onShutdown: () -> Unit = ::shutdownApplication,
     ) {
         val stagingFile = File(targetFile.parentFile, "${targetFile.name}.new")
         val backupFile = File(targetFile.parentFile, "${targetFile.name}.old")
@@ -423,11 +472,13 @@ object AppUpdater {
             throw e
         }
 
-        // Резервная копия .old удаляется только после успешной замены И успешного запуска новой версии.
+        // Резервная копия .old и временный файл удаляются синхронно до завершения старого процесса,
+        // только после того, как новая версия подтвердила успешную инициализацию.
         if (hadExistingTarget) {
             runCatching { Files.deleteIfExists(backupFile.toPath()) }
         }
         runCatching { downloadedFile.delete() }
+        onShutdown()
     }
 
     internal fun resolveLinuxAppImageFile(
@@ -485,9 +536,36 @@ object AppUpdater {
         }.getOrDefault(false)
     }
 
-    private fun relaunchLinuxAppImage(targetFile: File) {
-        ProcessBuilder(targetFile.absolutePath).start()
-        shutdownApplication()
+    internal fun relaunchLinuxAppImageAndAwaitReady(
+        targetFile: File,
+        timeoutMs: Long = STARTUP_CONFIRM_TIMEOUT_MS,
+    ) {
+        runCatching { Files.deleteIfExists(startupMarkerFile.toPath()) }
+        val process = ProcessBuilder(targetFile.absolutePath).start()
+        awaitStartupMarker(timeoutMs = timeoutMs, spawnedProcess = process)
+    }
+
+    internal fun awaitStartupMarker(
+        timeoutMs: Long,
+        spawnedProcess: Process?,
+    ) {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+        while (System.nanoTime() < deadline) {
+            if (startupMarkerFile.isFile) {
+                runCatching { Files.deleteIfExists(startupMarkerFile.toPath()) }
+                return
+            }
+            if (spawnedProcess != null && !spawnedProcess.isAlive) {
+                throw IOException(
+                    "Обновлённое приложение завершилось до окончания инициализации (код ${spawnedProcess.exitValue()})"
+                )
+            }
+            Thread.sleep(50)
+        }
+        spawnedProcess?.destroyForcibly()
+        throw IOException(
+            "Обновлённое приложение не подтвердило успешную инициализацию в течение ${timeoutMs / 1000} с"
+        )
     }
 
     private fun installWindowsExeAndRestart(downloadedFile: File) {
