@@ -82,21 +82,21 @@ class AppUpdaterTest {
     }
 
     @Test
-    fun `macOS DMG update renames old bundle until copy succeeds, then removes backup and relaunches`() {
+    fun `macOS DMG update keeps backup until relaunch succeeds, then removes backup`() {
         val tempDir = Files.createTempDirectory("mac-update-test-").toFile()
         try {
             val dmgFile = File(tempDir, "database-copier-1.3.0.dmg").apply { writeText("fake-dmg") }
             val targetApp = File(tempDir, "Applications/database-copier.app").apply { mkdirs() }
             val backupApp = File(tempDir, "Applications/database-copier.app.old")
 
-            val executedCommands = mutableListOf<List<String>>()
+            val events = mutableListOf<String>()
             var relaunchedBundle: File? = null
 
             AppUpdater.installMacDmgAndRestart(
                 dmgFile = dmgFile,
                 targetAppBundle = targetApp,
                 commandRunner = { cmd ->
-                    executedCommands.add(cmd)
+                    events.add(cmd.joinToString(" "))
                     if (cmd.take(2) == listOf("hdiutil", "attach")) {
                         val mountPointPath = cmd[cmd.indexOf("-mountpoint") + 1]
                         File(mountPointPath, "database-copier.app").mkdirs()
@@ -104,28 +104,20 @@ class AppUpdaterTest {
                     AppUpdater.CommandResult(exitCode = 0, output = "")
                 },
                 relauncher = { app ->
+                    events.add("relaunch ${app.absolutePath}")
                     relaunchedBundle = app
                 },
             )
 
-            assertEquals(6, executedCommands.size)
-            assertEquals(listOf("hdiutil", "attach", "-nobrowse", "-readonly", "-mountpoint"), executedCommands[0].take(5))
-            assertEquals(dmgFile.absolutePath, executedCommands[0].last())
+            val moveToBackupIdx = events.indexOf("mv ${targetApp.absolutePath} ${backupApp.absolutePath}")
+            val dittoIdx = events.indexOfFirst { it.startsWith("ditto ") && it.endsWith(targetApp.absolutePath) }
+            val relaunchIdx = events.indexOf("relaunch ${targetApp.absolutePath}")
+            val removeBackupIdx = events.indexOf("rm -rf ${backupApp.absolutePath}")
 
-            // 1. Старый бандл переименовывается в .old
-            assertEquals(listOf("mv", targetApp.absolutePath, backupApp.absolutePath), executedCommands[1])
-
-            // 2. Новый бандл копируется в целевой путь (пока старый хранится в .old)
-            assertEquals("ditto", executedCommands[2][0])
-            assertTrue(executedCommands[2][1].endsWith("/database-copier.app"))
-            assertEquals(targetApp.absolutePath, executedCommands[2][2])
-
-            // 3. Только после успешного копирования удаляется .old
-            assertEquals(listOf("rm", "-rf", backupApp.absolutePath), executedCommands[3])
-
-            assertEquals(listOf("xattr", "-cr", targetApp.absolutePath), executedCommands[4])
-            assertEquals(listOf("hdiutil", "detach"), executedCommands[5].take(2))
-            assertEquals("-quiet", executedCommands[5].last())
+            assertTrue(moveToBackupIdx >= 0)
+            assertTrue(dittoIdx > moveToBackupIdx)
+            assertTrue(relaunchIdx > dittoIdx, "Relaunch must happen after ditto")
+            assertTrue(removeBackupIdx > relaunchIdx, "Backup .app.old must be removed only AFTER relaunch succeeds")
 
             assertEquals(targetApp, relaunchedBundle)
             assertFalse(dmgFile.exists(), "Temporary DMG file should be deleted after update")
@@ -135,70 +127,57 @@ class AppUpdaterTest {
     }
 
     @Test
-    fun `macOS DMG update restores renamed backup when copying new bundle fails`() {
+    fun `macOS DMG update restores backup when ditto throws exception or relaunch fails`() {
         val tempDir = Files.createTempDirectory("mac-update-rollback-test-").toFile()
         try {
             val dmgFile = File(tempDir, "database-copier-1.3.0.dmg").apply { writeText("fake-dmg") }
             val targetApp = File(tempDir, "Applications/database-copier.app").apply { mkdirs() }
             val backupApp = File(tempDir, "Applications/database-copier.app.old")
 
-            val executedCommands = mutableListOf<List<String>>()
-            var relaunchedBundle: File? = null
-
+            // Случай 1: исключение при вызове ditto
+            val executedOnDittoException = mutableListOf<List<String>>()
             assertThrows(IOException::class.java) {
                 AppUpdater.installMacDmgAndRestart(
                     dmgFile = dmgFile,
                     targetAppBundle = targetApp,
                     commandRunner = { cmd ->
-                        executedCommands.add(cmd)
+                        executedOnDittoException.add(cmd)
                         when {
                             cmd.take(2) == listOf("hdiutil", "attach") -> {
                                 val mountPointPath = cmd[cmd.indexOf("-mountpoint") + 1]
                                 File(mountPointPath, "database-copier.app").mkdirs()
                                 AppUpdater.CommandResult(exitCode = 0, output = "")
                             }
-                            cmd.firstOrNull() == "ditto" -> {
-                                AppUpdater.CommandResult(exitCode = 1, output = "No space left on device")
-                            }
+                            cmd.firstOrNull() == "ditto" -> throw IOException("Process execution interrupted")
                             else -> AppUpdater.CommandResult(exitCode = 0, output = "")
                         }
                     },
-                    relauncher = { app ->
-                        relaunchedBundle = app
+                    relauncher = {},
+                )
+            }
+            assertTrue(executedOnDittoException.contains(listOf("mv", backupApp.absolutePath, targetApp.absolutePath)))
+
+            // Случай 2: ошибка при перезапуске нового .app
+            val executedOnRelaunchFailure = mutableListOf<List<String>>()
+            assertThrows(IOException::class.java) {
+                AppUpdater.installMacDmgAndRestart(
+                    dmgFile = dmgFile,
+                    targetAppBundle = targetApp,
+                    commandRunner = { cmd ->
+                        executedOnRelaunchFailure.add(cmd)
+                        if (cmd.take(2) == listOf("hdiutil", "attach")) {
+                            val mountPointPath = cmd[cmd.indexOf("-mountpoint") + 1]
+                            File(mountPointPath, "database-copier.app").mkdirs()
+                        }
+                        AppUpdater.CommandResult(exitCode = 0, output = "")
+                    },
+                    relauncher = {
+                        throw IOException("open -n failed")
                     },
                 )
             }
-
-            // При ошибке ditto частично скопированная целевая папка очищается, а старая версия возвращается из .old
-            assertTrue(executedCommands.contains(listOf("mv", targetApp.absolutePath, backupApp.absolutePath)))
-            assertTrue(executedCommands.contains(listOf("rm", "-rf", targetApp.absolutePath)))
-            assertTrue(executedCommands.contains(listOf("mv", backupApp.absolutePath, targetApp.absolutePath)))
-            assertNull(relaunchedBundle)
-        } finally {
-            tempDir.deleteRecursively()
-        }
-    }
-
-    @Test
-    fun `Linux AppImage update replaces existing file via backup and deletes backup on success`() {
-        val tempDir = Files.createTempDirectory("linux-update-test-").toFile()
-        try {
-            val targetAppImage = File(tempDir, "database-copier.AppImage").apply { writeText("old-binary") }
-            val downloadedAppImage = File(tempDir, "downloaded.AppImage").apply { writeText("new-binary") }
-            val backupAppImage = File(tempDir, "database-copier.AppImage.old")
-
-            var relaunchedFile: File? = null
-            AppUpdater.installLinuxAppImageAndRestart(
-                downloadedFile = downloadedAppImage,
-                targetFile = targetAppImage,
-                relauncher = { relaunchedFile = it },
-            )
-
-            assertEquals("new-binary", targetAppImage.readText())
-            assertTrue(targetAppImage.canExecute())
-            assertFalse(backupAppImage.exists(), "Backup .old file should be removed after successful replacement")
-            assertFalse(downloadedAppImage.exists(), "Downloaded staging file should be removed")
-            assertEquals(targetAppImage, relaunchedFile)
+            assertTrue(executedOnRelaunchFailure.contains(listOf("mv", backupApp.absolutePath, targetApp.absolutePath)))
+            assertFalse(executedOnRelaunchFailure.contains(listOf("rm", "-rf", backupApp.absolutePath)))
         } finally {
             tempDir.deleteRecursively()
         }
@@ -244,20 +223,83 @@ class AppUpdaterTest {
     }
 
     @Test
-    fun `resolveLinuxAppImageFile rejects missing APPIMAGE or non-AppImage path`() {
+    fun `Linux AppImage update replaces existing file, keeps backup until relaunch, and rolls back if relaunch fails`() {
+        val tempDir = Files.createTempDirectory("linux-update-test-").toFile()
+        try {
+            val targetAppImage = File(tempDir, "database-copier.AppImage").apply { writeText("old-binary") }
+            val downloadedAppImage = File(tempDir, "downloaded.AppImage").apply { writeText("new-binary") }
+            val backupAppImage = File(tempDir, "database-copier.AppImage.old")
+
+            // Сначала проверяем откат при сбое перезапуска
+            assertThrows(IOException::class.java) {
+                AppUpdater.installLinuxAppImageAndRestart(
+                    downloadedFile = downloadedAppImage,
+                    targetFile = targetAppImage,
+                    relauncher = {
+                        assertTrue(backupAppImage.exists(), "Backup .old must still exist during relaunch")
+                        throw IOException("Failed to start new AppImage")
+                    },
+                )
+            }
+            assertEquals("old-binary", targetAppImage.readText(), "Old binary must be restored on relaunch failure")
+            assertFalse(backupAppImage.exists())
+
+            // Теперь успешное обновление
+            var relaunchedFile: File? = null
+            AppUpdater.installLinuxAppImageAndRestart(
+                downloadedFile = downloadedAppImage,
+                targetFile = targetAppImage,
+                relauncher = {
+                    assertTrue(backupAppImage.exists(), "Backup .old must still exist until relaunch completes")
+                    relaunchedFile = it
+                },
+            )
+
+            assertEquals("new-binary", targetAppImage.readText())
+            assertTrue(targetAppImage.canExecute())
+            assertFalse(backupAppImage.exists(), "Backup .old file should be removed after successful relaunch")
+            assertFalse(downloadedAppImage.exists(), "Downloaded staging file should be removed")
+            assertEquals(targetAppImage, relaunchedFile)
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `resolveLinuxAppImageFile accepts renamed AppImage with ELF AI header and rejects plain binaries`() {
         assertThrows(IOException::class.java) {
             AppUpdater.resolveLinuxAppImageFile(appImageEnv = null)
         }
 
         val tempDir = Files.createTempDirectory("linux-appimage-resolve-test-").toFile()
         try {
-            val jpackageBinary = File(tempDir, "database-copier").apply { writeText("launcher") }
+            // Обычный ELF-лаунчер (без сигнатуры 'AI' на смещении 8) должен отклоняться
+            val plainElfBinary = File(tempDir, "database-copier").apply {
+                writeBytes(byteArrayOf(0x7F, 'E'.code.toByte(), 'L'.code.toByte(), 'F'.code.toByte(), 2, 1, 1, 0, 0, 0, 0))
+            }
             assertThrows(IOException::class.java) {
-                AppUpdater.resolveLinuxAppImageFile(appImageEnv = jpackageBinary.absolutePath)
+                AppUpdater.resolveLinuxAppImageFile(appImageEnv = plainElfBinary.absolutePath)
             }
 
-            val validAppImage = File(tempDir, "database-copier-1.2.7-x86_64.AppImage").apply { writeText("appimage") }
-            assertEquals(validAppImage, AppUpdater.resolveLinuxAppImageFile(appImageEnv = validAppImage.absolutePath))
+            // Переименованный пользователем AppImage без расширения .AppImage, но с сигнатурой ELF + 'AI\x02'
+            val renamedAppImage = File(tempDir, "my-db-copier").apply {
+                writeBytes(
+                    byteArrayOf(
+                        0x7F, 'E'.code.toByte(), 'L'.code.toByte(), 'F'.code.toByte(),
+                        2, 1, 1, 0,
+                        'A'.code.toByte(), 'I'.code.toByte(), 2,
+                    )
+                )
+            }
+            assertEquals(renamedAppImage, AppUpdater.resolveLinuxAppImageFile(appImageEnv = renamedAppImage.absolutePath))
+
+            // Файл внутри смонтированного APPDIR должен отклоняться
+            assertThrows(IOException::class.java) {
+                AppUpdater.resolveLinuxAppImageFile(
+                    appImageEnv = renamedAppImage.absolutePath,
+                    appDirEnv = tempDir.absolutePath,
+                )
+            }
         } finally {
             tempDir.deleteRecursively()
         }

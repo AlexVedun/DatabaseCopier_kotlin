@@ -195,10 +195,13 @@ object AppUpdater {
         dmgFile: File,
         targetAppBundle: File = resolveMacAppBundlePath(),
         commandRunner: (List<String>) -> CommandResult = ::runCommand,
-        relauncher: (File) -> Unit = ::relaunchMacApp,
+        relauncher: (File) -> Unit = { app -> relaunchMacApp(app, commandRunner) },
     ) {
         val mountPoint = Files.createTempDirectory("database-copier-dmg-").toFile()
+        val backupAppBundle = File(targetAppBundle.parentFile, "${targetAppBundle.name}.old")
         var mounted = false
+        var backupCreated = false
+
         try {
             val attachCmd = buildMacAttachCommand(dmgFile, mountPoint)
             val attachResult = commandRunner(attachCmd)
@@ -210,7 +213,6 @@ object AppUpdater {
             val mountedApp = findAppBundleInDirectory(mountPoint)
                 ?: throw IOException("Внутри смонтированного образа ${dmgFile.name} не найден .app-бандл")
 
-            val backupAppBundle = File(targetAppBundle.parentFile, "${targetAppBundle.name}.old")
             val hadExistingTarget = targetAppBundle.exists()
 
             if (backupAppBundle.exists()) {
@@ -222,8 +224,8 @@ object AppUpdater {
                 }
             }
 
-            // Переименовываем старый .app в .app.old и сохраняем его до успешного завершения копирования,
-            // чтобы при ошибке копирования можно было откатить рабочую версию обратно.
+            // Переименовываем старый .app в .app.old и сохраняем его до успешного перезапуска новой
+            // версии, чтобы при любой ошибке копирования или запуска откатить рабочую версию обратно.
             if (hadExistingTarget) {
                 val moveToBackup = commandRunner(
                     listOf("mv", targetAppBundle.absolutePath, backupAppBundle.absolutePath)
@@ -233,6 +235,7 @@ object AppUpdater {
                         "Не удалось переименовать ${targetAppBundle.absolutePath} в ${backupAppBundle.name}: ${moveToBackup.output}"
                     )
                 }
+                backupCreated = true
             } else {
                 targetAppBundle.parentFile?.mkdirs()
             }
@@ -241,47 +244,67 @@ object AppUpdater {
                 listOf("ditto", mountedApp.absolutePath, targetAppBundle.absolutePath)
             )
             if (copyResult.exitCode != 0) {
-                if (hadExistingTarget) {
-                    val rmPartial = commandRunner(listOf("rm", "-rf", targetAppBundle.absolutePath))
-                    val restoreBackup = if (rmPartial.exitCode == 0) {
-                        commandRunner(listOf("mv", backupAppBundle.absolutePath, targetAppBundle.absolutePath))
-                    } else {
-                        null
-                    }
-                    if (rmPartial.exitCode != 0 || restoreBackup == null || restoreBackup.exitCode != 0) {
-                        val rollbackDetails = restoreBackup?.output?.ifBlank { "код ${restoreBackup.exitCode}" }
-                            ?: rmPartial.output.ifBlank { "код ${rmPartial.exitCode}" }
-                        throw IOException(
-                            "Не удалось скопировать ${mountedApp.name} в ${targetAppBundle.absolutePath} (${copyResult.output}), " +
-                                "и не удалось автоматически восстановить резервную копию из ${backupAppBundle.absolutePath}: $rollbackDetails"
-                        )
-                    }
-                }
-                throw IOException(
-                    "Не удалось скопировать ${mountedApp.name} в ${targetAppBundle.absolutePath} (предыдущая версия восстановлена): ${copyResult.output}"
-                )
-            }
-
-            // Замена прошла успешно — удаляем резервную копию старого бандла.
-            if (hadExistingTarget) {
-                commandRunner(listOf("rm", "-rf", backupAppBundle.absolutePath))
+                throw IOException("Не удалось скопировать ${mountedApp.name} в ${targetAppBundle.absolutePath}: ${copyResult.output}")
             }
 
             // Снимаем карантинный атрибут со свежескопированного бандла, чтобы macOS не блокировала
             // повторный запуск без цифровой подписи Apple Developer ID.
             commandRunner(listOf("xattr", "-cr", targetAppBundle.absolutePath))
+        } catch (e: Throwable) {
+            if (backupCreated) {
+                rollbackMacAppBundle(targetAppBundle, backupAppBundle, commandRunner, e)
+            }
+            throw e
         } finally {
             if (mounted) {
-                val detachResult = commandRunner(buildMacDetachCommand(mountPoint, force = false))
-                if (detachResult.exitCode != 0) {
-                    commandRunner(buildMacDetachCommand(mountPoint, force = true))
+                runCatching {
+                    val detachResult = commandRunner(buildMacDetachCommand(mountPoint, force = false))
+                    if (detachResult.exitCode != 0) {
+                        commandRunner(buildMacDetachCommand(mountPoint, force = true))
+                    }
                 }
             }
             runCatching { mountPoint.deleteRecursively() }
-            runCatching { dmgFile.delete() }
         }
 
-        relauncher(targetAppBundle)
+        try {
+            relauncher(targetAppBundle)
+        } catch (e: Throwable) {
+            if (backupCreated) {
+                rollbackMacAppBundle(targetAppBundle, backupAppBundle, commandRunner, e)
+            }
+            throw e
+        }
+
+        // Только после успешного запуска новой версии удаляем резервную копию .app.old и временный DMG.
+        if (backupCreated) {
+            runCatching { commandRunner(listOf("rm", "-rf", backupAppBundle.absolutePath)) }
+        }
+        runCatching { dmgFile.delete() }
+    }
+
+    private fun rollbackMacAppBundle(
+        targetAppBundle: File,
+        backupAppBundle: File,
+        commandRunner: (List<String>) -> CommandResult,
+        cause: Throwable,
+    ) {
+        val rmPartial = runCatching { commandRunner(listOf("rm", "-rf", targetAppBundle.absolutePath)) }.getOrNull()
+        val restoreBackup = if (rmPartial?.exitCode == 0) {
+            runCatching { commandRunner(listOf("mv", backupAppBundle.absolutePath, targetAppBundle.absolutePath)) }.getOrNull()
+        } else {
+            null
+        }
+        if (rmPartial == null || rmPartial.exitCode != 0 || restoreBackup == null || restoreBackup.exitCode != 0) {
+            val rollbackDetails = restoreBackup?.output?.ifBlank { "код ${restoreBackup.exitCode}" }
+                ?: rmPartial?.output?.ifBlank { "код ${rmPartial.exitCode}" }
+                ?: "ошибка выполнения команды отката"
+            throw IOException(
+                "${cause.message ?: cause.javaClass.simpleName}; кроме того, не удалось автоматически восстановить " +
+                    "резервную копию из ${backupAppBundle.absolutePath}: $rollbackDetails",
+                cause,
+            )
+        }
     }
 
     internal fun buildMacAttachCommand(dmgFile: File, mountPoint: File): List<String> = listOf(
@@ -340,8 +363,14 @@ object AppUpdater {
         return null
     }
 
-    private fun relaunchMacApp(targetAppBundle: File) {
-        ProcessBuilder(buildMacRelaunchCommand(targetAppBundle)).start()
+    private fun relaunchMacApp(
+        targetAppBundle: File,
+        commandRunner: (List<String>) -> CommandResult = ::runCommand,
+    ) {
+        val launchResult = commandRunner(buildMacRelaunchCommand(targetAppBundle))
+        if (launchResult.exitCode != 0) {
+            throw IOException("Не удалось запустить обновлённое приложение ${targetAppBundle.absolutePath}: ${launchResult.output}")
+        }
         shutdownApplication()
     }
 
@@ -373,41 +402,87 @@ object AppUpdater {
                 targetFile.toPath(),
                 StandardCopyOption.REPLACE_EXISTING,
             )
-        } catch (e: Exception) {
+            relauncher(targetFile)
+        } catch (e: Throwable) {
             if (hadExistingTarget && backupFile.exists()) {
-                runCatching {
+                try {
                     Files.move(
                         backupFile.toPath(),
                         targetFile.toPath(),
                         StandardCopyOption.REPLACE_EXISTING,
+                    )
+                } catch (rollbackError: Throwable) {
+                    e.addSuppressed(rollbackError)
+                    throw IOException(
+                        "${e.message ?: e.javaClass.simpleName}; кроме того, не удалось автоматически восстановить " +
+                            "резервную копию из ${backupFile.absolutePath}: ${rollbackError.message}",
+                        e,
                     )
                 }
             }
             throw e
         }
 
+        // Резервная копия .old удаляется только после успешной замены И успешного запуска новой версии.
         if (hadExistingTarget) {
             runCatching { Files.deleteIfExists(backupFile.toPath()) }
         }
         runCatching { downloadedFile.delete() }
-
-        relauncher(targetFile)
     }
 
     internal fun resolveLinuxAppImageFile(
         appImageEnv: String? = System.getenv("APPIMAGE"),
+        appDirEnv: String? = System.getenv("APPDIR"),
     ): File {
         val currentAppImagePath = appImageEnv?.takeIf { it.isNotBlank() }
             ?: throw IOException(
                 "Переменная окружения APPIMAGE не задана — автозамена на Linux поддерживается только при запуске из .AppImage"
             )
         val file = File(currentAppImagePath)
-        if (!file.isFile || !file.name.endsWith(".AppImage", ignoreCase = true)) {
+        if (!file.isFile) {
             throw IOException(
-                "Некорректный путь APPIMAGE (${file.absolutePath}): ожидался существующий файл .AppImage"
+                "Некорректный путь APPIMAGE (${file.absolutePath}): файл не существует"
+            )
+        }
+        if (!appDirEnv.isNullOrBlank()) {
+            val appDirCanonical = runCatching { File(appDirEnv).canonicalPath }.getOrNull()
+            val fileCanonical = runCatching { file.canonicalPath }.getOrNull()
+            if (appDirCanonical != null && fileCanonical != null &&
+                (fileCanonical == appDirCanonical || fileCanonical.startsWith("$appDirCanonical${File.separator}"))
+            ) {
+                throw IOException(
+                    "Некорректный путь APPIMAGE (${file.absolutePath}): указывает внутрь смонтированного APPDIR ($appDirCanonical)"
+                )
+            }
+        }
+        if (!isLikelyAppImageFile(file)) {
+            throw IOException(
+                "Некорректный путь APPIMAGE (${file.absolutePath}): файл не является образом AppImage"
             )
         }
         return file
+    }
+
+    /**
+     * Проверяет, что файл является образом AppImage — либо по стандартной сигнатуре AppImage
+     * в ELF-заголовке (`\x7FELF` на смещении 0 и `'A', 'I'` на смещении 8, что работает даже если
+     * пользователь переименовал файл без расширения `.AppImage`), либо по расширению `.AppImage`.
+     */
+    internal fun isLikelyAppImageFile(file: File): Boolean {
+        if (file.name.endsWith(".AppImage", ignoreCase = true)) return true
+        return runCatching {
+            file.inputStream().use { input ->
+                val header = ByteArray(11)
+                val read = input.read(header)
+                read >= 10 &&
+                    header[0] == 0x7F.toByte() &&
+                    header[1] == 'E'.code.toByte() &&
+                    header[2] == 'L'.code.toByte() &&
+                    header[3] == 'F'.code.toByte() &&
+                    header[8] == 'A'.code.toByte() &&
+                    header[9] == 'I'.code.toByte()
+            }
+        }.getOrDefault(false)
     }
 
     private fun relaunchLinuxAppImage(targetFile: File) {
