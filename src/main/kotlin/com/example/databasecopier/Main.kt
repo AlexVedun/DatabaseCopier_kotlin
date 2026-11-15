@@ -9,6 +9,7 @@ import com.example.databasecopier.ui.LogViewerWindow
 import com.example.databasecopier.ui.SessionsView
 import com.example.databasecopier.ui.AppThemeMode
 import com.example.databasecopier.ui.ThemeManager
+import com.example.databasecopier.ui.UpdateDialog
 import javafx.application.Application
 import javafx.scene.Scene
 import javafx.scene.control.Alert
@@ -54,6 +55,7 @@ class DatabaseCopierApp : Application() {
         stage.show()
 
         showInitialScreen(contentPane)
+        UpdateDialog.checkAndPromptOnStartup(stage)
     }
 
     private fun buildMenuBar(): MenuBar {
@@ -78,7 +80,22 @@ class DatabaseCopierApp : Application() {
         }
         val languageMenu = buildLanguageMenu()
         val themeMenu = buildThemeMenu()
-        return MenuBar(Menu(Messages.get("menu.file"), null, connectionsMenuItem, logMenuItem, languageMenu, themeMenu))
+        val checkUpdatesMenuItem = MenuItem(Messages.get("menu.checkUpdates")).apply {
+            setOnAction {
+                UpdateDialog.checkInteractive(primaryStage)
+            }
+        }
+        return MenuBar(
+            Menu(
+                Messages.get("menu.file"),
+                null,
+                connectionsMenuItem,
+                logMenuItem,
+                languageMenu,
+                themeMenu,
+                checkUpdatesMenuItem,
+            )
+        )
     }
 
     private fun buildThemeMenu(): Menu {
